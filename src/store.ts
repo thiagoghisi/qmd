@@ -48,7 +48,7 @@ export const DEFAULT_EMBED_MODEL = "embeddinggemma";
 export const DEFAULT_RERANK_MODEL = "ExpedientFalcon/qwen3-reranker:0.6b-q8_0";
 export const DEFAULT_QUERY_MODEL = "Qwen/Qwen3-1.7B";
 export const DEFAULT_GLOB = "**/*.md";
-export const DEFAULT_MULTI_GET_MAX_BYTES = 10 * 1024; // 10KB
+export const DEFAULT_MULTI_GET_MAX_BYTES = 30 * 1024; // 30KB
 
 // Chunking: 900 tokens per chunk with 15% overlap
 // Increased from 800 to accommodate smart chunking finding natural break points

@@ -222,7 +222,93 @@ function createMcpServer(store: Store): McpServer {
   );
 
   // ---------------------------------------------------------------------------
-  // Tool: qmd_search (keyword)
+  // Prompt: query guide
+  // ---------------------------------------------------------------------------
+
+  server.registerPrompt(
+    "query",
+    {
+      title: "QMD Query Guide",
+      description: "How to effectively search your knowledge base with QMD",
+    },
+    () => ({
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `# QMD - Quick Markdown Search
+
+QMD is your on-device search engine for markdown knowledge bases. Use it to find information across your notes, documents, and meeting transcripts.
+
+## Available Tools
+
+### 1. search (Fast keyword search)
+Best for: Finding documents with specific keywords or phrases.
+- Uses BM25 full-text search
+- Fast, no LLM required
+- Good for exact matches
+- Use \`collection\` parameter to filter to a specific collection
+
+### 2. vsearch (Semantic search)
+Best for: Finding conceptually related content even without exact keyword matches.
+- Uses vector embeddings
+- Understands meaning and context
+- Good for "how do I..." or conceptual queries
+- Use \`collection\` parameter to filter to a specific collection
+
+### 3. query (Hybrid search - highest quality)
+Best for: Important searches where you want the best results.
+- Combines keyword + semantic search
+- Expands your query with variations
+- Re-ranks results with LLM
+- Slower but most accurate
+- Use \`collection\` parameter to filter to a specific collection
+
+### 4. get (Retrieve document)
+Best for: Getting the full content of a single document you found.
+- Use the file path from search results
+- Supports line ranges: \`file.md:100\` or fromLine/maxLines parameters
+- Suggests similar files if not found
+
+### 5. multi_get (Retrieve multiple documents)
+Best for: Getting content from multiple files at once.
+- Use glob patterns: \`journals/2025-05*.md\`
+- Or comma-separated: \`file1.md, file2.md\`
+- Skips files over maxBytes (default 30KB) - use get for large files
+
+### 6. status (Index info)
+Shows collection info, document counts, and embedding status.
+
+## Resources
+
+You can also access documents directly via the \`qmd://\` URI scheme:
+- List all documents: \`resources/list\`
+- Read a document: \`resources/read\` with uri \`qmd://path/to/file.md\`
+
+## Search Strategy
+
+1. **Start with search** for quick keyword lookups
+2. **Use vsearch** when keywords aren't working or for conceptual queries
+3. **Use query** for important searches or when you need high confidence
+4. **Use get** to retrieve a single full document
+5. **Use multi_get** to batch retrieve multiple related files
+
+## Tips
+
+- Use \`minScore: 0.5\` to filter low-relevance results
+- Use \`collection: "notes"\` to search only in a specific collection
+- Check the "Context" field - it describes what kind of content the file contains
+- File paths are relative to their collection (e.g., \`pages/meeting.md\`)
+- For glob patterns, match on display_path (e.g., \`journals/2025-*.md\`)`,
+          },
+        },
+      ],
+    })
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tool: qmd_search (BM25 full-text)
   // ---------------------------------------------------------------------------
 
   server.registerTool(
@@ -428,7 +514,7 @@ function createMcpServer(store: Store): McpServer {
       inputSchema: {
         pattern: z.string().describe("Glob pattern or comma-separated list of file paths"),
         maxLines: z.number().optional().describe("Maximum lines per file"),
-        maxBytes: z.number().optional().default(10240).describe("Skip files larger than this (default: 10240 = 10KB)"),
+        maxBytes: z.number().optional().default(30720).describe("Skip files larger than this (default: 30720 = 30KB)"),
         lineNumbers: z.boolean().optional().default(false).describe("Add line numbers to output (format: 'N: content')"),
       },
     },

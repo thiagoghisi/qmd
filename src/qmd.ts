@@ -68,7 +68,9 @@ import {
   createStore,
   getDefaultDbPath,
 } from "./store.js";
-import { disposeDefaultLlamaCpp, getDefaultLlamaCpp, withLLMSession, pullModels, DEFAULT_EMBED_MODEL_URI, DEFAULT_GENERATE_MODEL_URI, DEFAULT_RERANK_MODEL_URI, DEFAULT_MODEL_CACHE_DIR } from "./llm.js";
+import { getDefaultLlamaCpp, disposeDefaultLlamaCpp, withLLMSession, pullModels, DEFAULT_EMBED_MODEL_URI, DEFAULT_GENERATE_MODEL_URI, DEFAULT_RERANK_MODEL_URI, DEFAULT_MODEL_CACHE_DIR, type ILLMSession, type RerankDocument, type Queryable, type QueryType } from "./llm.js";
+import { isDaemonRunning, sendCommand, startDaemonServer, SOCKET_PATH, PID_FILE } from "./daemon.js";
+import type { SearchResult, RankedResult } from "./store.js";
 import {
   formatSearchResults,
   formatDocuments,
@@ -1783,6 +1785,52 @@ function shortPath(dirpath: string): string {
   return dirpath;
 }
 
+// Add line numbers to text content
+function addLineNumbers(text: string, startLine: number = 1): string {
+  const lines = text.split('\n');
+  return lines.map((line, i) => `${startLine + i}: ${line}`).join('\n');
+}
+
+/**
+ * Format daemon results for CLI output. Daemon returns pre-formatted results,
+ * so we re-wrap them to match outputResults format.
+ */
+function outputDaemonResults(data: { results: any[]; query: string }, opts: OutputOptions): void {
+  const { results, query } = data;
+  if (!results || results.length === 0) {
+    console.log("No results found.");
+    return;
+  }
+
+  if (opts.format === "json") {
+    console.log(JSON.stringify(results, null, 2));
+  } else {
+    // CLI-style output matching the regular outputResults format
+    for (const r of results) {
+      const file = r.file.startsWith("qmd://") ? r.file : `qmd://${r.file}`;
+      const line = r.line ? `:${r.line}` : "";
+      console.log(`${file}${line} ${r.docid || ""}`);
+      if (r.title) console.log(`Title: ${r.title}`);
+      if (r.context) console.log(`Context: ${r.context}`);
+      console.log(`Score:  ${Math.round(r.score * 100)}%`);
+      if (r.snippet) {
+        console.log("");
+        console.log(r.snippet);
+      }
+      console.log("\n");
+    }
+  }
+}
+
+function formatUptime(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return `${h}h ${m}m`;
+}
+
+
 function outputResults(results: { file: string; displayPath: string; title: string; body: string; score: number; context?: string | null; chunkPos?: number; hash?: string; docid?: string }[], query: string, opts: OutputOptions): void {
   const filtered = results.filter(r => r.score >= opts.minScore).slice(0, opts.limit);
 
@@ -2202,6 +2250,10 @@ function showHelp(): void {
   console.log("  qmd mcp --http [--port N]     - Start MCP server (HTTP transport, default port 8181)");
   console.log("  qmd mcp --http --daemon       - Start MCP server as background daemon");
   console.log("  qmd mcp stop                  - Stop background MCP daemon");
+  console.log("  qmd daemon start [--warmup]   - Start background daemon (keeps models warm)");
+  console.log("  qmd daemon stop               - Stop the daemon");
+  console.log("  qmd daemon status             - Show daemon status");
+  console.log("  qmd daemon warmup             - Pre-load all LLM models");
   console.log("");
   console.log("Global options:");
   console.log("  --index <name>             - Use custom index name (default: index)");
@@ -2467,6 +2519,21 @@ if (fileURLToPath(import.meta.url) === process.argv[1] || process.argv[1]?.endsW
       if (!cli.values["min-score"]) {
         cli.opts.minScore = 0.3;
       }
+      // Try daemon first for warm models
+      if (isDaemonRunning()) {
+        const resp = await sendCommand("vsearch", {
+          query: cli.query,
+          limit: cli.opts.limit,
+          collection: cli.opts.collection,
+          minScore: cli.opts.minScore,
+        });
+        if (resp.ok && resp.data) {
+          outputDaemonResults(resp.data as any, cli.opts);
+          break;
+        }
+        // Fall through to direct execution if daemon failed
+        process.stderr.write(`${c.dim}Daemon error, falling back to direct execution${c.reset}\n`);
+      }
       await vectorSearch(cli.query, cli.opts);
       break;
 
@@ -2475,6 +2542,21 @@ if (fileURLToPath(import.meta.url) === process.argv[1] || process.argv[1]?.endsW
       if (!cli.query) {
         console.error("Usage: qmd query [options] <query>");
         process.exit(1);
+      }
+      // Try daemon first for warm models
+      if (isDaemonRunning()) {
+        const resp = await sendCommand("query", {
+          query: cli.query,
+          limit: cli.opts.limit,
+          collection: cli.opts.collection,
+          minScore: cli.opts.minScore,
+        });
+        if (resp.ok && resp.data) {
+          outputDaemonResults(resp.data as any, cli.opts);
+          break;
+        }
+        // Fall through to direct execution if daemon failed
+        process.stderr.write(`${c.dim}Daemon error, falling back to direct execution${c.reset}\n`);
       }
       await querySearch(cli.query, cli.opts);
       break;
@@ -2594,13 +2676,150 @@ if (fileURLToPath(import.meta.url) === process.argv[1] || process.argv[1]?.endsW
       break;
     }
 
+    case "daemon": {
+      const subcommand = cli.args[0];
+      switch (subcommand) {
+        case "start": {
+          if (isDaemonRunning()) {
+            console.log(`${c.green}✓${c.reset} Daemon already running (PID file: ${PID_FILE})`);
+            process.exit(0);
+          }
+          console.log(`Starting qmd daemon...`);
+          // Fork a detached child process running the daemon
+          const { spawn } = await import("node:child_process");
+          const child = spawn(
+            process.argv[0],  // bun
+            [import.meta.filename, "daemon", "_serve"],
+            {
+              detached: true,
+              stdio: ["ignore", "pipe", "pipe"],
+            }
+          );
+
+          // Capture initial output to show startup messages
+          let started = false;
+          const startTimeout = setTimeout(() => {
+            if (!started) {
+              console.log(`${c.green}✓${c.reset} Daemon started (PID ${child.pid})`);
+              child.unref();
+              // If --warmup flag, send warmup command
+              if (cli.args.includes("--warmup")) {
+                console.log("Warming up models (this may take a minute)...");
+                sendCommand("warmup").then((resp) => {
+                  if (resp.ok) {
+                    console.log(`${c.green}✓${c.reset} Models warm`);
+                  }
+                  process.exit(0);
+                });
+              } else {
+                process.exit(0);
+              }
+            }
+          }, 2000);
+
+          child.stderr?.on("data", (data: Buffer) => {
+            const msg = data.toString();
+            process.stderr.write(msg);
+            if (msg.includes("Listening on")) {
+              started = true;
+              clearTimeout(startTimeout);
+              console.log(`${c.green}✓${c.reset} Daemon started (PID ${child.pid})`);
+              child.unref();
+              if (cli.args.includes("--warmup")) {
+                console.log("Warming up models...");
+                sendCommand("warmup").then((resp) => {
+                  if (resp.ok && resp.data) {
+                    console.log(`${c.green}✓${c.reset} Models warm in ${(resp.data as any).elapsed}s`);
+                  }
+                  process.exit(0);
+                });
+              } else {
+                process.exit(0);
+              }
+            }
+          });
+
+          child.on("error", (err) => {
+            console.error(`Failed to start daemon: ${err}`);
+            process.exit(1);
+          });
+
+          // Wait for startup or timeout
+          await new Promise((resolve) => setTimeout(resolve, 30000));
+          break;
+        }
+
+        case "_serve":
+          // Internal: the actual daemon process
+          await startDaemonServer();
+          break;
+
+        case "stop": {
+          if (!isDaemonRunning()) {
+            console.log("Daemon is not running.");
+            process.exit(0);
+          }
+          const resp = await sendCommand("shutdown");
+          if (resp.ok) {
+            console.log(`${c.green}✓${c.reset} Daemon stopped`);
+          } else {
+            console.error(`Failed to stop daemon: ${resp.error}`);
+          }
+          break;
+        }
+
+        case "status": {
+          if (!isDaemonRunning()) {
+            console.log("Daemon is not running.");
+            process.exit(0);
+          }
+          const resp = await sendCommand("status");
+          if (resp.ok && resp.data) {
+            const d = resp.data as any;
+            console.log(`${c.green}●${c.reset} Daemon running`);
+            console.log(`  PID:       ${d.pid}`);
+            console.log(`  Uptime:    ${formatUptime(d.uptime)}`);
+            console.log(`  Documents: ${d.totalDocuments}`);
+            console.log(`  Vectors:   ${d.totalEmbeddings || "N/A"}`);
+            console.log(`  Models:`);
+            console.log(`    Embed:    ${d.modelsLoaded?.embed ? `${c.green}loaded${c.reset}` : `${c.dim}not loaded${c.reset}`}`);
+            console.log(`    Generate: ${d.modelsLoaded?.generate ? `${c.green}loaded${c.reset}` : `${c.dim}not loaded${c.reset}`}`);
+            console.log(`    Rerank:   ${d.modelsLoaded?.rerank ? `${c.green}loaded${c.reset}` : `${c.dim}not loaded${c.reset}`}`);
+          } else {
+            console.error(`Failed to get status: ${resp.error}`);
+          }
+          break;
+        }
+
+        case "warmup": {
+          if (!isDaemonRunning()) {
+            console.error("Daemon is not running. Start it first: qmd daemon start");
+            process.exit(1);
+          }
+          console.log("Warming up models...");
+          const resp = await sendCommand("warmup");
+          if (resp.ok && resp.data) {
+            console.log(`${c.green}✓${c.reset} Models warm in ${(resp.data as any).elapsed}s`);
+          } else {
+            console.error(`Failed to warm up: ${resp.error}`);
+          }
+          break;
+        }
+
+        default:
+          console.error("Usage: qmd daemon <start [--warmup]|stop|status|warmup>");
+          process.exit(1);
+      }
+      break;
+    }
+
     default:
       console.error(`Unknown command: ${cli.command}`);
       console.error("Run 'qmd --help' for usage.");
       process.exit(1);
   }
 
-  if (cli.command !== "mcp") {
+  if (cli.command !== "mcp" && cli.command !== "daemon") {
     await disposeDefaultLlamaCpp();
     process.exit(0);
   }

@@ -1987,13 +1987,28 @@ function sanitizeFTS5Term(term: string): string {
   return term.replace(/[^\p{L}\p{N}']/gu, '').toLowerCase();
 }
 
+// Common English stop words that match nearly every document and add noise to OR queries.
+const STOP_WORDS = new Set([
+  'a','an','the','and','or','but','in','on','at','to','for','of','with','by',
+  'from','is','it','its','was','were','be','been','being','have','has','had',
+  'do','does','did','will','would','shall','should','may','might','must','can',
+  'could','i','me','my','mine','we','us','our','ours','you','your','yours',
+  'he','him','his','she','her','hers','they','them','their','theirs',
+  'this','that','these','those','what','which','who','whom','whose',
+  'where','when','how','why','not','no','nor','so','if','then','than',
+  'too','very','just','about','above','after','again','all','also','am','any',
+  'are','as','because','before','between','both','each','few','get','got',
+  'here','into','more','most','now','only','other','out','over','own',
+  'same','some','such','there','through','under','until','up','while',
+]);
+
 function buildFTS5Query(query: string): string | null {
   const terms = query.split(/\s+/)
     .map(t => sanitizeFTS5Term(t))
-    .filter(t => t.length > 0);
+    .filter(t => t.length > 0 && !STOP_WORDS.has(t));
   if (terms.length === 0) return null;
   if (terms.length === 1) return `"${terms[0]}"*`;
-  return terms.map(t => `"${t}"*`).join(' AND ');
+  return terms.map(t => `"${t}"*`).join(' OR ');
 }
 
 export function searchFTS(db: Database, query: string, limit: number = 20, collectionName?: string): SearchResult[] {

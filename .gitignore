@@ -16,3 +16,4 @@ texts/
 finetune/outputs/
 finetune/data/train/
 .claude/
+src/second-brain-eval.test.ts

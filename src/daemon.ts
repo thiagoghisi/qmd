@@ -285,7 +285,7 @@ export async function startDaemonServer(): Promise<void> {
           // Collect results
           const allResults = new Map<string, any>();
           for (const q of queries) {
-            const vecResults = await store.searchVec(q, DEFAULT_EMBED_MODEL, limit);
+            const vecResults = await store.searchVec(q.text, DEFAULT_EMBED_MODEL, limit);
             for (const r of vecResults) {
               if (collection && r.collectionName !== collection) continue;
               const existing = allResults.get(r.filepath);
@@ -422,7 +422,7 @@ export async function startDaemonServer(): Promise<void> {
                 const candidate = chunksToRerank.find((c: any) => c.file === r.file);
                 if (!candidate) return null;
                 const rrfIdx = candidates.findIndex((c: any) => c.filepath === r.file);
-                const rrfScore = rrfIdx >= 0 ? candidates[rrfIdx].score : 0;
+                const rrfScore = rrfIdx >= 0 ? candidates[rrfIdx]!.score : 0;
 
                 let rrfWeight: number;
                 if (rrfIdx < 3) rrfWeight = 0.75;

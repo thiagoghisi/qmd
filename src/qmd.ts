@@ -1786,12 +1786,6 @@ function shortPath(dirpath: string): string {
   return dirpath;
 }
 
-// Add line numbers to text content
-function addLineNumbers(text: string, startLine: number = 1): string {
-  const lines = text.split('\n');
-  return lines.map((line, i) => `${startLine + i}: ${line}`).join('\n');
-}
-
 /**
  * Format daemon results for CLI output. Daemon returns pre-formatted results,
  * so we re-wrap them to match outputResults format.
@@ -2706,11 +2700,11 @@ if (fileURLToPath(import.meta.url) === process.argv[1] || process.argv[1]?.endsW
           // Fork a detached child process running the daemon
           const { spawn } = await import("node:child_process");
           const child = spawn(
-            process.argv[0],  // bun
+            process.argv[0]!,
             [import.meta.filename, "daemon", "_serve"],
             {
               detached: true,
-              stdio: ["ignore", "pipe", "pipe"],
+              stdio: ["ignore", "pipe", "pipe"] as const,
             }
           );
 

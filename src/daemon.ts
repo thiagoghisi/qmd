@@ -202,20 +202,41 @@ export async function startDaemonServer(): Promise<void> {
         sendStderr("[qmd daemon] Warming up models...\n");
         const llm = getDefaultLlamaCpp();
 
-        // Load all 3 models in parallel
         const start = Date.now();
+        const loaded: string[] = [];
+        const failed: string[] = [];
+
         await withLLMSession(async (session) => {
-          await Promise.all([
-            session.expandQuery("test warmup query").catch(() => {}),
-            session.embed("test warmup text").catch(() => {}),
+          // Load embed + generate in parallel
+          const results = await Promise.allSettled([
+            session.expandQuery("test warmup query").then(() => { loaded.push("generate"); }),
+            session.embed("test warmup text").then(() => { loaded.push("embed"); }),
           ]);
-          // Rerank needs docs
-          await session.rerank("test", [{ file: "test.md", text: "warmup text" }]).catch(() => {});
+          for (const r of results) {
+            if (r.status === "rejected") {
+              const name = loaded.length === 0 ? "generate" : "embed";
+              failed.push(name);
+              sendStderr(`[qmd daemon] Warning: ${name} model failed to load: ${r.reason}\n`);
+            }
+          }
+
+          // Rerank needs docs — load separately so failures are clearly attributed
+          try {
+            await session.rerank("test", [{ file: "test.md", text: "warmup text" }]);
+            loaded.push("rerank");
+          } catch (e) {
+            failed.push("rerank");
+            sendStderr(`[qmd daemon] Warning: rerank model failed to load: ${e}\n`);
+          }
         });
 
         const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-        sendStderr(`[qmd daemon] Models warm in ${elapsed}s\n`);
-        return { ok: true, data: { elapsed: parseFloat(elapsed) } };
+        if (failed.length > 0) {
+          sendStderr(`[qmd daemon] Warmup partial: ${loaded.join(", ")} loaded; ${failed.join(", ")} failed (${elapsed}s)\n`);
+        } else {
+          sendStderr(`[qmd daemon] All models warm in ${elapsed}s\n`);
+        }
+        return { ok: true, data: { elapsed: parseFloat(elapsed), loaded, failed } };
       }
 
       case "search": {

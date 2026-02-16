@@ -139,6 +139,7 @@ const c = {
   dim: useColor ? "\x1b[2m" : "",
   bold: useColor ? "\x1b[1m" : "",
   cyan: useColor ? "\x1b[36m" : "",
+  red: useColor ? "\x1b[31m" : "",
   yellow: useColor ? "\x1b[33m" : "",
   green: useColor ? "\x1b[32m" : "",
   magenta: useColor ? "\x1b[35m" : "",
@@ -2171,6 +2172,8 @@ function parseCLI() {
       mask: { type: "string" },  // glob pattern
       // Embed options
       force: { type: "boolean", short: "f" },
+      // Daemon options
+      warmup: { type: "boolean" },
       // Update options
       pull: { type: "boolean" },  // git pull before update
       refresh: { type: "boolean" },
@@ -2677,6 +2680,21 @@ if (fileURLToPath(import.meta.url) === process.argv[1] || process.argv[1]?.endsW
     }
 
     case "daemon": {
+      // Helper to display warmup results consistently
+      function logWarmupResult(resp: any) {
+        if (resp.ok && resp.data) {
+          const { elapsed, loaded, failed } = resp.data;
+          if (failed && failed.length > 0) {
+            console.log(`${c.yellow}⚠${c.reset} Warmup partial in ${elapsed}s: ${loaded.join(", ")} loaded`);
+            console.log(`  ${c.red}✗${c.reset} Failed: ${failed.join(", ")}`);
+          } else {
+            console.log(`${c.green}✓${c.reset} Models warm in ${elapsed}s`);
+          }
+        } else {
+          console.error(`${c.red}✗${c.reset} Warmup failed: ${resp.error || "unknown error"}`);
+        }
+      }
+
       const subcommand = cli.args[0];
       switch (subcommand) {
         case "start": {
@@ -2698,24 +2716,20 @@ if (fileURLToPath(import.meta.url) === process.argv[1] || process.argv[1]?.endsW
 
           // Capture initial output to show startup messages
           let started = false;
+          // Fallback: if "Listening on" is not detected within 3s, assume started.
+          // Don't attempt warmup here — the daemon may not be accepting connections yet.
+          // The user can run `qmd daemon warmup` manually if the happy path didn't fire.
           const startTimeout = setTimeout(() => {
             if (!started) {
+              started = true;
               console.log(`${c.green}✓${c.reset} Daemon started (PID ${child.pid})`);
               child.unref();
-              // If --warmup flag, send warmup command
-              if (cli.args.includes("--warmup")) {
-                console.log("Warming up models (this may take a minute)...");
-                sendCommand("warmup").then((resp) => {
-                  if (resp.ok) {
-                    console.log(`${c.green}✓${c.reset} Models warm`);
-                  }
-                  process.exit(0);
-                });
-              } else {
-                process.exit(0);
+              if (cli.values.warmup) {
+                console.log(`${c.yellow}⚠${c.reset} Daemon may still be initializing. Run \`qmd daemon warmup\` once it's ready.`);
               }
+              process.exit(0);
             }
-          }, 2000);
+          }, 3000);
 
           child.stderr?.on("data", (data: Buffer) => {
             const msg = data.toString();
@@ -2725,12 +2739,17 @@ if (fileURLToPath(import.meta.url) === process.argv[1] || process.argv[1]?.endsW
               clearTimeout(startTimeout);
               console.log(`${c.green}✓${c.reset} Daemon started (PID ${child.pid})`);
               child.unref();
-              if (cli.args.includes("--warmup")) {
+              if (cli.values.warmup) {
+                // Keep event loop alive while warmup runs by using a timer
+                const keepAlive = setInterval(() => {}, 1000);
                 console.log("Warming up models...");
                 sendCommand("warmup").then((resp) => {
-                  if (resp.ok && resp.data) {
-                    console.log(`${c.green}✓${c.reset} Models warm in ${(resp.data as any).elapsed}s`);
-                  }
+                  clearInterval(keepAlive);
+                  logWarmupResult(resp);
+                  process.exit(0);
+                }).catch((err) => {
+                  clearInterval(keepAlive);
+                  console.error(`${c.red}✗${c.reset} Warmup failed: ${err}`);
                   process.exit(0);
                 });
               } else {
@@ -2798,11 +2817,7 @@ if (fileURLToPath(import.meta.url) === process.argv[1] || process.argv[1]?.endsW
           }
           console.log("Warming up models...");
           const resp = await sendCommand("warmup");
-          if (resp.ok && resp.data) {
-            console.log(`${c.green}✓${c.reset} Models warm in ${(resp.data as any).elapsed}s`);
-          } else {
-            console.error(`Failed to warm up: ${resp.error}`);
-          }
+          logWarmupResult(resp);
           break;
         }
 

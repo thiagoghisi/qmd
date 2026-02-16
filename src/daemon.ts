@@ -167,6 +167,13 @@ export async function startDaemonServer(): Promise<void> {
   enableProductionMode();
   const store = createStore();
 
+  /** Normalize collection arg: string, string[], or undefined → string[] */
+  function normalizeCollection(raw: unknown): string[] {
+    if (!raw) return [];
+    if (Array.isArray(raw)) return raw;
+    return [raw as string];
+  }
+
   console.error(`[qmd daemon] PID ${process.pid}, socket ${SOCKET_PATH}`);
   console.error(`[qmd daemon] Database opened, ${store.getStatus().totalDocuments} documents indexed`);
 
@@ -242,11 +249,11 @@ export async function startDaemonServer(): Promise<void> {
       case "search": {
         const query = args.query as string;
         const limit = (args.limit as number) || 10;
-        const collection = args.collection as string | undefined;
+        const collection = normalizeCollection(args.collection);
         const minScore = (args.minScore as number) || 0;
 
         const results = store.searchFTS(query, limit)
-          .filter((r: any) => !collection || r.collectionName === collection)
+          .filter((r: any) => collection.length === 0 || collection.includes(r.collectionName))
           .filter((r: any) => r.score >= minScore)
           .map((r: any) => {
             const { line, snippet } = extractSnippet(r.body || "", query, 300, r.chunkPos);
@@ -267,7 +274,7 @@ export async function startDaemonServer(): Promise<void> {
       case "vsearch": {
         const query = args.query as string;
         const limit = (args.limit as number) || 10;
-        const collection = args.collection as string | undefined;
+        const collection = normalizeCollection(args.collection);
         const minScore = (args.minScore as number) || 0.3;
 
         // Intercept stderr for progress
@@ -287,7 +294,7 @@ export async function startDaemonServer(): Promise<void> {
           for (const q of queries) {
             const vecResults = await store.searchVec(q.text, DEFAULT_EMBED_MODEL, limit);
             for (const r of vecResults) {
-              if (collection && r.collectionName !== collection) continue;
+              if (collection.length > 0 && !collection.includes(r.collectionName)) continue;
               const existing = allResults.get(r.filepath);
               if (!existing || r.score > existing.score) {
                 allResults.set(r.filepath, r);
@@ -326,7 +333,7 @@ export async function startDaemonServer(): Promise<void> {
       case "query": {
         const query = args.query as string;
         const limit = (args.limit as number) || 5;
-        const collection = args.collection as string | undefined;
+        const collection = normalizeCollection(args.collection);
         const minScore = (args.minScore as number) || 0;
 
         // Intercept stderr for progress
@@ -339,7 +346,7 @@ export async function startDaemonServer(): Promise<void> {
         try {
           // Replicate the querySearch pipeline from qmd.ts
           const initialFts = store.searchFTS(query, 20)
-            .filter((r: any) => !collection || r.collectionName === collection);
+            .filter((r: any) => collection.length === 0 || collection.includes(r.collectionName));
 
           const hasVectors = !!store.db.prepare(
             `SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`
@@ -371,7 +378,7 @@ export async function startDaemonServer(): Promise<void> {
 
             for (const q of ftsQueries) {
               const ftsResults = store.searchFTS(q, 20)
-                .filter((r: any) => !collection || r.collectionName === collection);
+                .filter((r: any) => collection.length === 0 || collection.includes(r.collectionName));
               if (ftsResults.length > 0) {
                 rankedLists.push(ftsResults.map((r: any) => {
                   hashMap.set(r.filepath, r.hash);
@@ -384,7 +391,7 @@ export async function startDaemonServer(): Promise<void> {
               for (const q of vectorQueries) {
                 searchPromises.push((async () => {
                   const vecResults = await store.searchVec(q, DEFAULT_EMBED_MODEL, 20)
-                    .then((r: any[]) => r.filter((r: any) => !collection || r.collectionName === collection));
+                    .then((r: any[]) => r.filter((r: any) => collection.length === 0 || collection.includes(r.collectionName)));
                   if (vecResults.length > 0) {
                     rankedLists.push(vecResults.map((r: any) => {
                       hashMap.set(r.filepath, r.hash);

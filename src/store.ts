@@ -2233,10 +2233,16 @@ export async function expandQuery(query: string, model: string = DEFAULT_QUERY_M
   const results = await llm.expandQuery(query);
 
   // Map Queryable[] → ExpandedQuery[] (same shape, decoupled from llm.ts internals).
-  // Filter out entries that duplicate the original query text.
+  // Note: we no longer filter out entries matching the original query, because
+  // when grammar-based expansion fails, the fallback returns {type:'vec', text:query}
+  // which we need to keep for vsearch to work.
   const expanded: ExpandedQuery[] = results
-    .filter(r => r.text !== query)
     .map(r => ({ type: r.type, text: r.text }));
+
+  // Always ensure at least one vec query exists as fallback
+  if (!expanded.some(e => e.type === 'vec')) {
+    expanded.push({ type: 'vec', text: query });
+  }
 
   if (expanded.length > 0) {
     setCachedResult(db, cacheKey, JSON.stringify(expanded));

@@ -527,6 +527,21 @@ export async function startDaemonServer(): Promise<void> {
     });
   });
 
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      // Socket file exists — try removing it and retrying once
+      console.error(`[qmd daemon] Socket in use, removing stale socket and retrying...`);
+      try { unlinkSync(SOCKET_PATH); } catch {}
+      server.listen(SOCKET_PATH, () => {
+        console.error(`[qmd daemon] Listening on ${SOCKET_PATH}`);
+      });
+    } else {
+      console.error(`[qmd daemon] Server error: ${err.message}`);
+      cleanupStaleFiles();
+      process.exit(1);
+    }
+  });
+
   server.listen(SOCKET_PATH, () => {
     console.error(`[qmd daemon] Listening on ${SOCKET_PATH}`);
   });

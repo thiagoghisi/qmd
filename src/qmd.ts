@@ -2778,7 +2778,7 @@ if (fileURLToPath(import.meta.url) === process.argv[1] || process.argv[1]?.endsW
           } else {
             console.error(`Failed to stop daemon: ${resp.error}`);
           }
-          break;
+          process.exit(0);
         }
 
         case "status": {
@@ -2801,7 +2801,7 @@ if (fileURLToPath(import.meta.url) === process.argv[1] || process.argv[1]?.endsW
           } else {
             console.error(`Failed to get status: ${resp.error}`);
           }
-          break;
+          process.exit(0);
         }
 
         case "warmup": {
@@ -2812,7 +2812,7 @@ if (fileURLToPath(import.meta.url) === process.argv[1] || process.argv[1]?.endsW
           console.log("Warming up models...");
           const resp = await sendCommand("warmup");
           logWarmupResult(resp);
-          break;
+          process.exit(0);
         }
 
         default:

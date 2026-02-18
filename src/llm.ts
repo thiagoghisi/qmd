@@ -366,6 +366,7 @@ export class LlamaCpp implements LLM {
   private modelCacheDir: string;
 
   // Ensure we don't load the same model/context concurrently (which can allocate duplicate VRAM).
+  private llamaLoadPromise: Promise<Llama> | null = null;
   private embedModelLoadPromise: Promise<LlamaModel> | null = null;
   private generateModelLoadPromise: Promise<LlamaModel> | null = null;
   private rerankModelLoadPromise: Promise<LlamaModel> | null = null;
@@ -488,9 +489,17 @@ export class LlamaCpp implements LLM {
 
   /**
    * Initialize the llama instance (lazy)
+   * Uses promise guard to prevent concurrent initialization race condition.
    */
   private async ensureLlama(): Promise<Llama> {
-    if (!this.llama) {
+    if (this.llama) {
+      return this.llama;
+    }
+    if (this.llamaLoadPromise) {
+      return await this.llamaLoadPromise;
+    }
+
+    this.llamaLoadPromise = (async () => {
       // Detect available GPU types and use the best one.
       // We can't rely on gpu:"auto" — it returns false even when CUDA is available
       // (likely a binary/build config issue in node-llama-cpp).
@@ -519,8 +528,14 @@ export class LlamaCpp implements LLM {
         );
       }
       this.llama = llama;
+      return llama;
+    })();
+
+    try {
+      return await this.llamaLoadPromise;
+    } finally {
+      this.llamaLoadPromise = null;
     }
-    return this.llama;
   }
 
   /**
@@ -1130,6 +1145,7 @@ export class LlamaCpp implements LLM {
     this.llama = null;
 
     // Clear any in-flight load/create promises
+    this.llamaLoadPromise = null;
     this.embedModelLoadPromise = null;
     this.embedContextsCreatePromise = null;
     this.generateModelLoadPromise = null;

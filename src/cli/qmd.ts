@@ -4662,7 +4662,7 @@ if (isMain) {
           } else {
             console.error(`Failed to stop daemon: ${resp.error}`);
           }
-          break;
+          process.exit(0);
         }
 
         case "status": {
@@ -4685,7 +4685,7 @@ if (isMain) {
           } else {
             console.error(`Failed to get status: ${resp.error}`);
           }
-          break;
+          process.exit(0);
         }
 
         case "warmup": {
@@ -4696,7 +4696,7 @@ if (isMain) {
           console.log("Warming up models...");
           const resp = await sendCommand("warmup");
           logWarmupResult(resp);
-          break;
+          process.exit(0);
         }
 
         default:

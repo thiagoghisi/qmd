@@ -941,8 +941,19 @@ describe.skipIf(!!process.env.CI)("LlamaCpp Integration", () => {
   });
 
   describe("expandQuery", () => {
+    // Generate model requires more GPU memory than embed+rerank combined.
+    // Dispose previous models to free GPU memory before loading generate model.
+    let freshLlm: LlamaCpp;
+
+    beforeAll(async () => {
+      // Dispose singleton to free GPU memory from embed/rerank models
+      await disposeDefaultLlamaCpp();
+      // Get fresh instance for generate model
+      freshLlm = getDefaultLlamaCpp();
+    });
+
     test("returns query expansions with correct types", async () => {
-      const result = await llm.expandQuery("test query");
+      const result = await freshLlm.expandQuery("test query");
 
       // Result is Queryable[] containing lex, vec, and/or hyde entries
       expect(result.length).toBeGreaterThanOrEqual(1);
@@ -955,7 +966,7 @@ describe.skipIf(!!process.env.CI)("LlamaCpp Integration", () => {
     }, 30000); // 30s timeout for model loading
 
     test("can exclude lexical queries", async () => {
-      const result = await llm.expandQuery("authentication setup", { includeLexical: false });
+      const result = await freshLlm.expandQuery("authentication setup", { includeLexical: false });
 
       // Should not contain any 'lex' type entries
       const lexEntries = result.filter(q => q.type === "lex");

@@ -4641,6 +4641,17 @@ if (isMain) {
             process.exit(1);
           });
 
+          child.on("exit", (code, signal) => {
+            if (!started) {
+              started = true;
+              clearTimeout(startTimeout);
+              if (code !== 0) {
+                console.error(`${c.red}✗${c.reset} Daemon exited with ${signal ? `signal ${signal}` : `code ${code}`}`);
+                process.exit(1);
+              }
+            }
+          });
+
           // Wait for startup or timeout
           await new Promise((resolve) => setTimeout(resolve, 30000));
           break;

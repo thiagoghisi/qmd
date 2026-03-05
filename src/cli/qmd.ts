@@ -1556,9 +1556,21 @@ function formatLsTime(date: Date): string {
 }
 
 // Collection management commands
-function collectionList(): void {
+function collectionList(format: OutputFormat = "cli"): void {
   const db = getDb();
   const collections = listCollections(db);
+
+  if (format === "json") {
+    console.log(JSON.stringify(collections.map(coll => ({
+      name: coll.name,
+      path: coll.pwd,
+      pattern: coll.glob_pattern,
+      files: coll.active_count,
+      lastModified: coll.last_modified,
+    }))));
+    closeDb();
+    return;
+  }
 
   if (collections.length === 0) {
     console.log("No collections found. Run 'qmd collection add .' to create one.");
@@ -4102,7 +4114,7 @@ if (isMain) {
       const subcommand = cli.args[0];
       switch (subcommand) {
         case "list": {
-          collectionList();
+          collectionList(cli.opts.format);
           break;
         }
 

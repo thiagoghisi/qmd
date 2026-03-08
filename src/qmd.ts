@@ -1453,6 +1453,8 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
   let indexed = 0, updated = 0, unchanged = 0, processed = 0;
   const seenPaths = new Set<string>();
   const startTime = Date.now();
+  const isTTY = process.stderr.isTTY;
+  let lastProgressWrite = 0;
 
   for (const relativeFile of files) {
     const filepath = getRealPath(resolve(resolvedPwd, relativeFile));
@@ -1502,11 +1504,15 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
 
     processed++;
     progress.set((processed / total) * 100);
-    const elapsed = (Date.now() - startTime) / 1000;
-    const rate = processed / elapsed;
-    const remaining = (total - processed) / rate;
-    const eta = processed > 2 ? ` ETA: ${formatETA(remaining)}` : "";
-    process.stderr.write(`\rIndexing: ${processed}/${total}${eta}        `);
+    const now2 = Date.now();
+    if (isTTY && (now2 - lastProgressWrite >= 200 || processed === total)) {
+      lastProgressWrite = now2;
+      const elapsed = (now2 - startTime) / 1000;
+      const rate = processed / elapsed;
+      const remaining = (total - processed) / rate;
+      const eta = processed > 2 ? ` ETA: ${formatETA(remaining)}` : "";
+      process.stderr.write(`\rIndexing: ${processed}/${total}${eta}        `);
+    }
   }
 
   // Deactivate documents in this collection that no longer exist
@@ -1633,6 +1639,8 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
 
     let chunksEmbedded = 0, errors = 0, bytesProcessed = 0;
     const startTime = Date.now();
+    const embedIsTTY = process.stderr.isTTY;
+    let embedLastProgressWrite = 0;
 
     // Batch embedding for better throughput
     // Process in batches of 32 to balance memory usage and efficiency
@@ -1686,18 +1694,22 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
       const percent = (bytesProcessed / totalBytes) * 100;
       progress.set(percent);
 
-      const elapsed = (Date.now() - startTime) / 1000;
-      const bytesPerSec = bytesProcessed / elapsed;
-      const remainingBytes = totalBytes - bytesProcessed;
-      const etaSec = remainingBytes / bytesPerSec;
+      const embedNow = Date.now();
+      if (embedIsTTY && (embedNow - embedLastProgressWrite >= 200 || bytesProcessed >= totalBytes)) {
+        embedLastProgressWrite = embedNow;
+        const elapsed = (embedNow - startTime) / 1000;
+        const bytesPerSec = bytesProcessed / elapsed;
+        const remainingBytes = totalBytes - bytesProcessed;
+        const etaSec = remainingBytes / bytesPerSec;
 
-      const bar = renderProgressBar(percent);
-      const percentStr = percent.toFixed(0).padStart(3);
-      const throughput = `${formatBytes(bytesPerSec)}/s`;
-      const eta = elapsed > 2 ? formatETA(etaSec) : "...";
-      const errStr = errors > 0 ? ` ${c.yellow}${errors} err${c.reset}` : "";
+        const bar = renderProgressBar(percent);
+        const percentStr = percent.toFixed(0).padStart(3);
+        const throughput = `${formatBytes(bytesPerSec)}/s`;
+        const eta = elapsed > 2 ? formatETA(etaSec) : "...";
+        const errStr = errors > 0 ? ` ${c.yellow}${errors} err${c.reset}` : "";
 
-      process.stderr.write(`\r${c.cyan}${bar}${c.reset} ${c.bold}${percentStr}%${c.reset} ${c.dim}${chunksEmbedded}/${totalChunks}${c.reset}${errStr} ${c.dim}${throughput} ETA ${eta}${c.reset}   `);
+        process.stderr.write(`\r${c.cyan}${bar}${c.reset} ${c.bold}${percentStr}%${c.reset} ${c.dim}${chunksEmbedded}/${totalChunks}${c.reset}${errStr} ${c.dim}${throughput} ETA ${eta}${c.reset}   `);
+      }
     }
 
     progress.clear();

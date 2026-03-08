@@ -2,7 +2,7 @@
  * QMD Debug Logger
  *
  * Writes structured debug logs to ~/.cache/qmd/debug.log
- * Enable with QMD_DEBUG=1 environment variable.
+ * ON by default. Disable with QMD_NO_DEBUG=1 environment variable.
  *
  * Usage:
  *   import { debug } from "./debug.js";

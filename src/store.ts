@@ -562,7 +562,7 @@ export function getDefaultDbPath(indexName: string = "index"): string {
 
   const cacheDir = process.env.XDG_CACHE_HOME || resolve(homedir(), ".cache");
   const qmdCacheDir = resolve(cacheDir, "qmd");
-  try { mkdirSync(qmdCacheDir, { recursive: true }); } catch { }
+  try { mkdirSync(qmdCacheDir, { recursive: true }); } catch (err) { debug("store", "mkdirSync failed for cache dir", { path: qmdCacheDir, error: String(err) }); }
   return resolve(qmdCacheDir, `${indexName}.sqlite`);
 }
 

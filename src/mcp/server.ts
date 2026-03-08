@@ -31,6 +31,7 @@ import {
 } from "../index.js";
 import { getConfigPath } from "../collections.js";
 import { enableProductionMode } from "../store.js";
+import { debug } from "../debug.js";
 
 // =============================================================================
 // Types for structured content
@@ -824,6 +825,7 @@ export async function startMcpHttpServer(
       nodeRes.writeHead(404);
       nodeRes.end("Not Found");
     } catch (err) {
+      debug("mcp.http", "handler error", { pathname, method: nodeReq.method, error: String(err) });
       console.error("HTTP handler error:", err);
       nodeRes.writeHead(500);
       nodeRes.end("Internal Server Error");

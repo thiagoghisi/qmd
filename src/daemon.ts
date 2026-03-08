@@ -341,6 +341,7 @@ export async function startDaemonServer(): Promise<void> {
 
           return { ok: true, data: { results, query } };
         } catch (err: any) {
+          debug("daemon.vsearch", "ERROR", { error: err?.message || String(err), stack: err?.stack?.split("\n").slice(0, 3) });
           console.error(`[qmd daemon] vsearch error:`, err);
           return { ok: false, error: `vsearch failed: ${err?.message || err}` };
         } finally {
@@ -517,7 +518,11 @@ export async function startDaemonServer(): Promise<void> {
   // Unix socket server
   // -------------------------------------------------------------------------
 
+  let clientCount = 0;
   const server = createServer((socket: Socket) => {
+    clientCount++;
+    const clientId = clientCount;
+    debug("daemon.conn", `client connected (#${clientId})`);
     let buffer = "";
 
     socket.on("data", (chunk) => {
@@ -560,20 +565,23 @@ export async function startDaemonServer(): Promise<void> {
         });
     });
 
-    socket.on("error", () => {
-      // Client disconnected - ignore
+    socket.on("error", (err: NodeJS.ErrnoException) => {
+      debug("daemon.conn", `client #${clientId} socket error`, { code: err.code, message: err.message });
     });
   });
 
   server.on("error", (err: NodeJS.ErrnoException) => {
     if (err.code === "EADDRINUSE") {
       // Socket file exists — try removing it and retrying once
+      debug("daemon.socket", "EADDRINUSE, removing stale socket and retrying", { path: SOCKET_PATH });
       console.error(`[qmd daemon] Socket in use, removing stale socket and retrying...`);
       try { unlinkSync(SOCKET_PATH); } catch {}
       server.listen(SOCKET_PATH, () => {
+        debug("daemon.socket", "listening after EADDRINUSE retry", { path: SOCKET_PATH });
         console.error(`[qmd daemon] Listening on ${SOCKET_PATH}`);
       });
     } else {
+      debug("daemon.socket", "server error", { code: err.code, message: err.message });
       console.error(`[qmd daemon] Server error: ${err.message}`);
       cleanupStaleFiles();
       process.exit(1);
@@ -581,20 +589,24 @@ export async function startDaemonServer(): Promise<void> {
   });
 
   server.listen(SOCKET_PATH, () => {
+    debug("daemon.socket", "listening", { path: SOCKET_PATH });
     console.error(`[qmd daemon] Listening on ${SOCKET_PATH}`);
   });
 
   // Graceful shutdown on signals
-  const shutdown = async () => {
-    console.error("[qmd daemon] Signal received, shutting down...");
+  const shutdown = async (signal: string) => {
+    const t0 = Date.now();
+    debug("daemon.shutdown", `${signal} received, shutting down`);
+    console.error(`[qmd daemon] ${signal} received, shutting down...`);
     server.close();
     await disposeDefaultLlamaCpp();
     cleanupStaleFiles();
+    debug("daemon.shutdown", `done in ${Date.now() - t0}ms`);
     process.exit(0);
   };
 
-  process.on("SIGTERM", shutdown);
-  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 
   // Keep process alive
   await new Promise(() => {});

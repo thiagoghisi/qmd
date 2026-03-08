@@ -11,6 +11,8 @@
  * SQLite build before creating any database instances.
  */
 
+import { debug } from "./debug.js";
+
 export const isBun = "Bun" in globalThis;
 
 export type SQLiteValue = string | number | bigint | Buffer | Uint8Array | Float32Array | null;
@@ -65,7 +67,11 @@ if (isBun) {
  * Open a SQLite database. Works with both bun:sqlite and better-sqlite3.
  */
 export function openDatabase(path: string): Database {
-  return new _Database(path) as Database;
+  const t0 = Date.now();
+  debug("db.open", "opening database", { path });
+  const db = new _Database(path) as Database;
+  debug("db.open", `done in ${Date.now() - t0}ms`);
+  return db;
 }
 
 /**

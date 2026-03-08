@@ -16,6 +16,7 @@ import type { Database } from "./db.js";
 import picomatch from "picomatch";
 import { createHash } from "crypto";
 import { realpathSync, statSync, mkdirSync } from "node:fs";
+import { debug } from "./debug.js";
 import {
   LlamaCpp,
   getDefaultLlamaCpp,
@@ -2013,6 +2014,7 @@ function buildFTS5Query(query: string): string | null {
 
 export function searchFTS(db: Database, query: string, limit: number = 20, collectionName?: string): SearchResult[] {
   const ftsQuery = buildFTS5Query(query);
+  debug("fts", "search", { query, ftsQuery: ftsQuery || "(empty)", limit, collection: collectionName || "all" });
   if (!ftsQuery) return [];
 
   let sql = `
@@ -2040,6 +2042,7 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
   params.push(limit);
 
   const rows = db.prepare(sql).all(...params) as { filepath: string; display_path: string; title: string; body: string; hash: string; bm25_score: number }[];
+  debug("fts", `results: ${rows.length}`, rows.length > 0 ? { topScore: Math.abs(rows[0]!.bm25_score) / (1 + Math.abs(rows[0]!.bm25_score)), bottomScore: Math.abs(rows[rows.length - 1]!.bm25_score) / (1 + Math.abs(rows[rows.length - 1]!.bm25_score)) } : undefined);
   return rows.map(row => {
     const collectionName = row.filepath.split('//')[1]?.split('/')[0] || "";
     // Convert bm25 (negative, lower is better) into a stable [0..1) score where higher is better.
@@ -2069,11 +2072,14 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
 // =============================================================================
 
 export async function searchVec(db: Database, query: string, model: string, limit: number = 20, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[]): Promise<SearchResult[]> {
+  debug("vec", "search", { query: query.slice(0, 100), limit, collection: collectionName || "all", precomputed: !!precomputedEmbedding });
   const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
-  if (!tableExists) return [];
+  if (!tableExists) { debug("vec", "no vectors_vec table"); return []; }
 
+  const embedStart = Date.now();
   const embedding = precomputedEmbedding ?? await getEmbedding(query, model, true, session);
-  if (!embedding) return [];
+  if (!embedding) { debug("vec", "embedding failed"); return []; }
+  if (!precomputedEmbedding) debug("vec", `embedded in ${Date.now() - embedStart}ms`, { dims: embedding.length });
 
   // IMPORTANT: We use a two-step query approach here because sqlite-vec virtual tables
   // hang indefinitely when combined with JOINs in the same query. Do NOT try to
@@ -2087,6 +2093,7 @@ export async function searchVec(db: Database, query: string, model: string, limi
     WHERE embedding MATCH ? AND k = ?
   `).all(new Float32Array(embedding), limit * 3) as { hash_seq: string; distance: number }[];
 
+  debug("vec", `sqlite-vec returned ${vecResults.length} matches`, vecResults.length > 0 ? { bestDist: vecResults[0]!.distance, worstDist: vecResults[vecResults.length - 1]!.distance } : undefined);
   if (vecResults.length === 0) return [];
 
   // Step 2: Get chunk info and document data
@@ -2130,6 +2137,8 @@ export async function searchVec(db: Database, query: string, model: string, limi
       seen.set(row.filepath, { row, bestDist: distance });
     }
   }
+
+  debug("vec", `deduped ${docRows.length} rows → ${seen.size} unique files`);
 
   return Array.from(seen.values())
     .sort((a, b) => a.bestDist - b.bestDist)
@@ -2222,12 +2231,16 @@ export async function expandQuery(query: string, model: string = DEFAULT_QUERY_M
   const cached = getCachedResult(db, cacheKey);
   if (cached) {
     try {
-      return JSON.parse(cached) as ExpandedQuery[];
+      const parsed = JSON.parse(cached) as ExpandedQuery[];
+      debug("expand", "cache hit", { query, count: parsed.length, types: parsed.map(e => e.type) });
+      return parsed;
     } catch {
       // Old cache format (pre-typed, newline-separated text) — re-expand
     }
   }
 
+  debug("expand", "cache miss — running LLM expansion", { query });
+  const expandStart = Date.now();
   const llm = getDefaultLlamaCpp();
   // Note: LlamaCpp uses hardcoded model, model parameter is ignored
   const results = await llm.expandQuery(query);
@@ -2243,6 +2256,8 @@ export async function expandQuery(query: string, model: string = DEFAULT_QUERY_M
   if (!expanded.some(e => e.type === 'vec')) {
     expanded.push({ type: 'vec', text: query });
   }
+
+  debug("expand", `LLM expansion done in ${Date.now() - expandStart}ms`, { count: expanded.length, types: expanded.map(e => e.type), texts: expanded.map(e => e.text.slice(0, 80)) });
 
   if (expanded.length > 0) {
     setCachedResult(db, cacheKey, JSON.stringify(expanded));
@@ -2272,8 +2287,11 @@ export async function rerank(query: string, documents: { file: string; text: str
     }
   }
 
+  debug("rerank", "cache check", { total: documents.length, cached: cachedResults.size, uncached: uncachedDocs.length });
+
   // Rerank uncached documents using LlamaCpp
   if (uncachedDocs.length > 0) {
+    const rerankStart = Date.now();
     const llm = getDefaultLlamaCpp();
     const rerankResult = await llm.rerank(query, uncachedDocs, { model });
 
@@ -2284,6 +2302,7 @@ export async function rerank(query: string, documents: { file: string; text: str
       setCachedResult(db, cacheKey, result.score.toString());
       cachedResults.set(result.file, result.score);
     }
+    debug("rerank", `LLM rerank done in ${Date.now() - rerankStart}ms`, { docs: uncachedDocs.length });
   }
 
   // Return all results sorted by score
@@ -2835,6 +2854,9 @@ export async function hybridQuery(
   const collection = options?.collection;
   const hooks = options?.hooks;
 
+  debug("hybrid", "=== START ===", { query, limit, minScore, candidateLimit, collection: collection || "all" });
+  const hybridStart = Date.now();
+
   const rankedLists: RankedResult[][] = [];
   const docidMap = new Map<string, string>(); // filepath -> docid
   const hasVectors = !!store.db.prepare(
@@ -2850,6 +2872,7 @@ export async function hybridQuery(
     && topScore >= STRONG_SIGNAL_MIN_SCORE
     && (topScore - secondScore) >= STRONG_SIGNAL_MIN_GAP;
 
+  debug("hybrid", "step1: BM25 probe", { results: initialFts.length, topScore, secondScore, gap: topScore - secondScore, hasStrongSignal });
   if (hasStrongSignal) hooks?.onStrongSignal?.(topScore);
 
   // Step 2: Expand query (or skip if strong signal)
@@ -2857,6 +2880,7 @@ export async function hybridQuery(
     ? []
     : await store.expandQuery(query);
 
+  debug("hybrid", "step2: expansion", { skipped: hasStrongSignal, count: expanded.length, types: expanded.map(e => e.type) });
   hooks?.onExpand?.(query, expanded);
 
   // Seed with initial FTS results (avoid re-running original query FTS)
@@ -2924,9 +2948,11 @@ export async function hybridQuery(
   }
 
   // Step 4: RRF fusion — first 2 lists (original FTS + first vec) get 2x weight
+  debug("hybrid", "step3: ranked lists collected", { lists: rankedLists.length, sizes: rankedLists.map(l => l.length) });
   const weights = rankedLists.map((_, i) => i < 2 ? 2.0 : 1.0);
   const fused = reciprocalRankFusion(rankedLists, weights);
   const candidates = fused.slice(0, candidateLimit);
+  debug("hybrid", "step4: RRF fusion", { fused: fused.length, candidates: candidates.length });
 
   if (candidates.length === 0) return [];
 
@@ -2954,9 +2980,11 @@ export async function hybridQuery(
   }
 
   // Step 6: Rerank chunks (NOT full bodies)
+  debug("hybrid", "step5: chunks selected for rerank", { chunks: chunksToRerank.length });
   hooks?.onRerankStart?.(chunksToRerank.length);
   const reranked = await store.rerank(query, chunksToRerank);
   hooks?.onRerankDone?.();
+  debug("hybrid", "step6: rerank done", { topScore: reranked[0]?.score, bottomScore: reranked[reranked.length - 1]?.score });
 
   // Step 7: Blend RRF position score with reranker score
   // Position-aware weights: top retrieval results get more protection from reranker disagreement
@@ -2995,7 +3023,7 @@ export async function hybridQuery(
 
   // Step 8: Dedup by file (safety net — prevents duplicate output)
   const seenFiles = new Set<string>();
-  return blended
+  const finalResults = blended
     .filter(r => {
       if (seenFiles.has(r.file)) return false;
       seenFiles.add(r.file);
@@ -3003,6 +3031,13 @@ export async function hybridQuery(
     })
     .filter(r => r.score >= minScore)
     .slice(0, limit);
+
+  debug("hybrid", "=== DONE ===", {
+    elapsed: `${Date.now() - hybridStart}ms`,
+    results: finalResults.length,
+    scores: finalResults.slice(0, 5).map(r => ({ file: r.displayPath, score: r.score.toFixed(4) })),
+  });
+  return finalResults;
 }
 
 export interface VectorSearchOptions {
@@ -3045,9 +3080,13 @@ export async function vectorSearchQuery(
   ).get();
   if (!hasVectors) return [];
 
+  debug("vsearch", "=== START ===", { query, limit, minScore, collection: collection || "all" });
+  const vsearchStart = Date.now();
+
   // Expand query — filter to vec/hyde only (lex queries target FTS, not vector)
   const allExpanded = await store.expandQuery(query);
   const vecExpanded = allExpanded.filter(q => q.type !== 'lex');
+  debug("vsearch", "expansions", { total: allExpanded.length, vecOnly: vecExpanded.length });
   options?.hooks?.onExpand?.(query, vecExpanded);
 
   // Run original + vec/hyde expanded through vector, sequentially — concurrent embed() hangs
@@ -3071,8 +3110,15 @@ export async function vectorSearchQuery(
     }
   }
 
-  return Array.from(allResults.values())
+  const vsearchResults = Array.from(allResults.values())
     .sort((a, b) => b.score - a.score)
     .filter(r => r.score >= minScore)
     .slice(0, limit);
+  debug("vsearch", "=== DONE ===", {
+    elapsed: `${Date.now() - vsearchStart}ms`,
+    unique: allResults.size,
+    afterFilter: vsearchResults.length,
+    scores: vsearchResults.slice(0, 5).map(r => ({ file: r.displayPath, score: r.score.toFixed(4) })),
+  });
+  return vsearchResults;
 }

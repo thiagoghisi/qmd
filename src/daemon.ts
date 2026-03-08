@@ -19,6 +19,7 @@
  */
 
 import { unlinkSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { debug } from "./debug.js";
 import { createServer, connect, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -186,6 +187,10 @@ export async function startDaemonServer(): Promise<void> {
     args: Record<string, unknown>,
     sendStderr: (msg: string) => void
   ): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+    const cmdStart = Date.now();
+    debug("daemon", `>>> ${command}`, args);
+    try {
+    const result = await (async (): Promise<{ ok: boolean; data?: unknown; error?: string }> => {
     switch (command) {
       case "status": {
         const status = store.getStatus();
@@ -276,6 +281,7 @@ export async function startDaemonServer(): Promise<void> {
         const limit = (args.limit as number) || 10;
         const collection = normalizeCollection(args.collection);
         const minScore = (args.minScore as number) || 0.3;
+        debug("daemon.vsearch", "start", { query, limit, collection, minScore });
 
         // Intercept stderr for progress
         const origWrite = process.stderr.write.bind(process.stderr);
@@ -286,7 +292,9 @@ export async function startDaemonServer(): Promise<void> {
 
         try {
           sendStderr(`Expanding query...\n`);
+          const expandStart = Date.now();
           const queries = await store.expandQuery(query, DEFAULT_QUERY_MODEL);
+          debug("daemon.vsearch", `expanded in ${Date.now() - expandStart}ms`, { count: queries.length, types: queries.map(q => q.type) });
           sendStderr(`Expanded to ${queries.length} queries, searching vectors...\n`);
 
           // Collect results
@@ -302,6 +310,7 @@ export async function startDaemonServer(): Promise<void> {
             }
           }
 
+          debug("daemon.vsearch", `found ${allResults.size} unique results`);
           sendStderr(`Found ${allResults.size} unique results\n`);
 
           const results = Array.from(allResults.values())
@@ -335,6 +344,7 @@ export async function startDaemonServer(): Promise<void> {
         const limit = (args.limit as number) || 5;
         const collection = normalizeCollection(args.collection);
         const minScore = (args.minScore as number) || 0;
+        debug("daemon.query", "start", { query, limit, collection, minScore });
 
         // Intercept stderr for progress
         const origWrite = process.stderr.write.bind(process.stderr);
@@ -355,6 +365,7 @@ export async function startDaemonServer(): Promise<void> {
           const topScore = initialFts[0]?.score ?? 0;
           const secondScore = initialFts[1]?.score ?? 0;
           const hasStrongSignal = initialFts.length > 0 && topScore >= 0.85 && (topScore - secondScore) >= 0.15;
+          debug("daemon.query", "BM25 probe", { ftsResults: initialFts.length, topScore, secondScore, hasStrongSignal });
 
           let results: any[] = [];
 
@@ -363,7 +374,9 @@ export async function startDaemonServer(): Promise<void> {
             let vectorQueries: string[] = [query];
 
             if (!hasStrongSignal) {
+              const expandStart = Date.now();
               const queryables = await session.expandQuery(query);
+              debug("daemon.query", `expanded in ${Date.now() - expandStart}ms`, { count: queryables.length, types: queryables.map(q => q.type) });
               for (const q of queryables) {
                 if (q.type === 'lex' && q.text && q.text !== query) ftsQueries.push(q.text);
                 else if ((q.type === 'vec' || q.type === 'hyde') && q.text && q.text !== query) vectorQueries.push(q.text);
@@ -405,10 +418,12 @@ export async function startDaemonServer(): Promise<void> {
 
             if (rankedLists.length === 0) return;
 
+            debug("daemon.query", "ranked lists", { lists: rankedLists.length, sizes: rankedLists.map(l => l.length) });
             const weights = rankedLists.map(() => 1.0);
             const fused = reciprocalRankFusion(rankedLists, weights);
             const RERANK_DOC_LIMIT = 40;
             const candidates = fused.slice(0, RERANK_DOC_LIMIT);
+            debug("daemon.query", "RRF fusion", { fused: fused.length, candidates: candidates.length });
 
             // Prepare chunks for reranking
             const chunksToRerank = candidates.map((c: any) => {
@@ -416,12 +431,16 @@ export async function startDaemonServer(): Promise<void> {
               return { file: c.filepath, text: body.slice(0, 3000), displayPath: c.displayPath, title: c.title, score: c.score, docid: c.docid };
             });
 
+            debug("daemon.query", "reranking", { chunks: chunksToRerank.length });
             sendStderr(`Reranking ${chunksToRerank.length} documents...\n`);
 
+            const rerankStart = Date.now();
             const rerankResult = await session.rerank(
               query,
               chunksToRerank.map((ch: any) => ({ file: ch.file, text: ch.text }))
             );
+
+            debug("daemon.query", `rerank done in ${Date.now() - rerankStart}ms`, { resultCount: rerankResult.results.length });
 
             // Blend scores — session.rerank returns { results: [...], model: "..." }
             results = rerankResult.results
@@ -472,6 +491,13 @@ export async function startDaemonServer(): Promise<void> {
 
       default:
         return { ok: false, error: `Unknown command: ${command}` };
+    }
+    })();
+    debug("daemon", `<<< ${command} done in ${Date.now() - cmdStart}ms`, { ok: result.ok });
+    return result;
+    } catch (err: any) {
+      debug("daemon", `<<< ${command} ERROR in ${Date.now() - cmdStart}ms`, { error: err?.message || String(err) });
+      throw err;
     }
   }
 

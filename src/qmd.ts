@@ -5,7 +5,7 @@ import { execSync, spawn as nodeSpawn } from "child_process";
 import { fileURLToPath } from "url";
 import { dirname, join as pathJoin } from "path";
 import { parseArgs } from "util";
-import { readFileSync, statSync, existsSync, unlinkSync, writeFileSync, openSync, closeSync, mkdirSync } from "fs";
+import { readFileSync, statSync, existsSync, unlinkSync, writeFileSync, openSync, closeSync, mkdirSync, appendFileSync } from "fs";
 import {
   getPwd,
   getRealPath,
@@ -70,6 +70,7 @@ import {
 } from "./store.js";
 import { getDefaultLlamaCpp, disposeDefaultLlamaCpp, withLLMSession, pullModels, DEFAULT_EMBED_MODEL_URI, DEFAULT_GENERATE_MODEL_URI, DEFAULT_RERANK_MODEL_URI, DEFAULT_MODEL_CACHE_DIR, type ILLMSession, type RerankDocument, type Queryable, type QueryType } from "./llm.js";
 import { isDaemonRunning, sendCommand, startDaemonServer, SOCKET_PATH, PID_FILE } from "./daemon.js";
+import { debug } from "./debug.js";
 import type { SearchResult, RankedResult } from "./store.js";
 import {
   formatSearchResults,
@@ -430,6 +431,8 @@ async function updateCollections(): Promise<void> {
   }
 
   // Don't close db here - indexFiles will reuse it and close at the end
+  debug("update", `=== START === ${collections.length} collections`);
+  const updateStart = Date.now();
   console.log(`${c.bold}Updating ${collections.length} collection(s)...${c.reset}\n`);
 
   for (let i = 0; i < collections.length; i++) {
@@ -482,6 +485,7 @@ async function updateCollections(): Promise<void> {
   const needsEmbedding = getHashesNeedingEmbedding(finalDb);
   closeDb();
 
+  debug("update", `=== DONE === in ${Date.now() - updateStart}ms`, { collections: collections.length, needsEmbedding });
   console.log(`${c.green}✓ All collections updated.${c.reset}`);
   if (needsEmbedding > 0) {
     console.log(`\nRun 'qmd embed' to update embeddings (${needsEmbedding} unique hashes need vectors)`);
@@ -1362,6 +1366,7 @@ async function collectionAdd(pwd: string, globPattern: string, name?: string): P
   addCollection(collName, pwd, globPattern);
 
   // Create the collection and index files
+  debug("collection", `adding '${collName}'`, { pwd, pattern: globPattern });
   console.log(`Creating collection '${collName}'...`);
   await indexFiles(pwd, globPattern, collName);
   console.log(`${c.green}✓${c.reset} Collection '${collName}' created successfully`);
@@ -1417,6 +1422,7 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
   const resolvedPwd = pwd || getPwd();
   const now = new Date().toISOString();
   const excludeDirs = ["node_modules", ".git", ".cache", "vendor", "dist", "build"];
+  const indexStart = Date.now();
 
   // Clear Ollama cache on index
   clearCache(db);
@@ -1426,6 +1432,7 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
     throw new Error("Collection name is required. Collections must be defined in ~/.config/qmd/index.yml");
   }
 
+  debug("index", `=== START ${collectionName} ===`, { pwd: resolvedPwd, pattern: globPattern });
   console.log(`Collection: ${resolvedPwd} (${globPattern})`);
 
   progress.indeterminate();
@@ -1443,7 +1450,9 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
   });
 
   const total = files.length;
+  debug("index", `glob found ${total} files (from ${allFiles.length} before hidden filter)`);
   if (total === 0) {
+    debug("index", `=== DONE ${collectionName} === no files`);
     progress.clear();
     console.log("No files found matching pattern.");
     closeDb();
@@ -1532,6 +1541,7 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
   const needsEmbedding = getHashesNeedingEmbedding(db);
 
   progress.clear();
+  debug("index", `=== DONE ${collectionName} === in ${Date.now() - indexStart}ms`, { indexed, updated, unchanged, removed, orphanedContent, needsEmbedding });
   console.log(`\nIndexed: ${indexed} new, ${updated} updated, ${unchanged} unchanged, ${removed} removed`);
   if (orphanedContent > 0) {
     console.log(`Cleaned up ${orphanedContent} orphaned content hash(es)`);
@@ -1554,6 +1564,8 @@ function renderProgressBar(percent: number, width: number = 30): string {
 async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean = false): Promise<void> {
   const db = getDb();
   const now = new Date().toISOString();
+  const embedCmdStart = Date.now();
+  debug("embed", "=== START ===", { model, force });
 
   // If force, clear all vectors
   if (force) {
@@ -1564,7 +1576,9 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
   // Find unique hashes that need embedding (from active documents)
   const hashesToEmbed = getHashesForEmbedding(db);
 
+  debug("embed", `${hashesToEmbed.length} hashes need embedding`);
   if (hashesToEmbed.length === 0) {
+    debug("embed", "=== DONE === nothing to embed");
     console.log(`${c.green}✓ All content hashes already have embeddings.${c.reset}`);
     closeDb();
     return;
@@ -1612,6 +1626,7 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
   const totalChunks = allChunks.length;
   const totalDocs = hashesToEmbed.length;
 
+  debug("embed", "chunking done", { docs: totalDocs, chunks: totalChunks, bytes: totalBytes, multiChunkDocs });
   console.log(`${c.bold}Embedding ${totalDocs} documents${c.reset} ${c.dim}(${totalChunks} chunks, ${formatBytes(totalBytes)})${c.reset}`);
   if (multiChunkDocs > 0) {
     console.log(`${c.dim}${multiChunkDocs} documents split into multiple chunks${c.reset}`);
@@ -1722,6 +1737,7 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
     if (errors > 0) {
       console.log(`${c.yellow}⚠ ${errors} chunks failed${c.reset}`);
     }
+    debug("embed", `=== DONE === in ${Date.now() - embedCmdStart}ms`, { chunksEmbedded, errors, docs: totalDocs, throughput: avgThroughput + "/s" });
   }, { maxDuration: 30 * 60 * 1000, name: 'embed-command' });
 
   closeDb();
@@ -2316,9 +2332,32 @@ async function showVersion(): Promise<void> {
   console.log(`qmd ${versionStr}`);
 }
 
+function logAccess(command: string, args: string[], startTime: number, exitCode?: number): void {
+  try {
+    const cacheDir = process.env.XDG_CACHE_HOME
+      ? resolve(process.env.XDG_CACHE_HOME, "qmd")
+      : resolve(homedir(), ".cache", "qmd");
+    mkdirSync(cacheDir, { recursive: true });
+    const logPath = resolve(cacheDir, "access.log");
+    const elapsed = Date.now() - startTime;
+    const ts = new Date().toISOString();
+    const cmdStr = [command, ...args].join(" ");
+    const status = exitCode !== undefined ? ` exit=${exitCode}` : "";
+    appendFileSync(logPath, `${ts} ${cmdStr} (${elapsed}ms${status})\n`);
+  } catch {
+    // Never fail on logging
+  }
+}
+
 // Main CLI - only run if this is the main module
 if (fileURLToPath(import.meta.url) === process.argv[1] || process.argv[1]?.endsWith("/qmd.ts") || process.argv[1]?.endsWith("/qmd.js")) {
   const cli = parseCLI();
+  const cliStartTime = Date.now();
+
+  // Log every CLI invocation to ~/.cache/qmd/access.log
+  process.on("exit", (code) => {
+    logAccess(cli.command, process.argv.slice(3), cliStartTime, code);
+  });
 
   if (cli.values.version) {
     await showVersion();
@@ -2542,6 +2581,7 @@ if (fileURLToPath(import.meta.url) === process.argv[1] || process.argv[1]?.endsW
       }
       // Try daemon first for warm models
       if (isDaemonRunning()) {
+        debug("cli", "vsearch: using daemon");
         const resp = await sendCommand("vsearch", {
           query: cli.query,
           limit: cli.opts.limit,
@@ -2549,11 +2589,15 @@ if (fileURLToPath(import.meta.url) === process.argv[1] || process.argv[1]?.endsW
           minScore: cli.opts.minScore,
         });
         if (resp.ok && resp.data) {
+          debug("cli", "vsearch: daemon returned results", { resultCount: (resp.data as any).results?.length });
           outputDaemonResults(resp.data as any, cli.opts);
           break;
         }
         // Fall through to direct execution if daemon failed
+        debug("cli", "vsearch: daemon failed, falling back", { error: resp.error });
         process.stderr.write(`${c.dim}Daemon error, falling back to direct execution${c.reset}\n`);
+      } else {
+        debug("cli", "vsearch: no daemon, direct execution");
       }
       await vectorSearch(cli.query, cli.opts);
       break;
@@ -2566,6 +2610,7 @@ if (fileURLToPath(import.meta.url) === process.argv[1] || process.argv[1]?.endsW
       }
       // Try daemon first for warm models
       if (isDaemonRunning()) {
+        debug("cli", "query: using daemon");
         const resp = await sendCommand("query", {
           query: cli.query,
           limit: cli.opts.limit,
@@ -2573,10 +2618,12 @@ if (fileURLToPath(import.meta.url) === process.argv[1] || process.argv[1]?.endsW
           minScore: cli.opts.minScore,
         });
         if (resp.ok && resp.data) {
+          debug("cli", "query: daemon returned results", { resultCount: (resp.data as any).results?.length });
           outputDaemonResults(resp.data as any, cli.opts);
           break;
         }
         // Fall through to direct execution if daemon failed
+        debug("cli", "query: daemon failed, falling back", { error: resp.error });
         process.stderr.write(`${c.dim}Daemon error, falling back to direct execution${c.reset}\n`);
       }
       await querySearch(cli.query, cli.opts);

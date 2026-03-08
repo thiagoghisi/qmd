@@ -6,6 +6,8 @@
  * difference is the import path.
  */
 
+import { debug } from "./debug.js";
+
 export const isBun = typeof globalThis.Bun !== "undefined";
 
 let _Database: any;
@@ -27,7 +29,11 @@ if (isBun) {
  * Open a SQLite database. Works with both bun:sqlite and better-sqlite3.
  */
 export function openDatabase(path: string): Database {
-  return new _Database(path) as Database;
+  const t0 = Date.now();
+  debug("db.open", "opening database", { path });
+  const db = new _Database(path) as Database;
+  debug("db.open", `done in ${Date.now() - t0}ms`);
+  return db;
 }
 
 /**
@@ -50,5 +56,12 @@ export interface Statement {
  * Load the sqlite-vec extension into a database.
  */
 export function loadSqliteVec(db: Database): void {
-  _sqliteVecLoad(db);
+  const t0 = Date.now();
+  try {
+    _sqliteVecLoad(db);
+    debug("db.ext", `sqlite-vec loaded in ${Date.now() - t0}ms`);
+  } catch (err) {
+    debug("db.ext", `sqlite-vec load failed in ${Date.now() - t0}ms`, { error: String(err) });
+    throw err;
+  }
 }

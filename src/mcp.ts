@@ -26,6 +26,7 @@ import {
 import type { Store } from "./store.js";
 import { getCollection, getGlobalContext } from "./collections.js";
 import { disposeDefaultLlamaCpp } from "./llm.js";
+import { debug } from "./debug.js";
 
 // =============================================================================
 // Types for structured content
@@ -729,6 +730,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
       nodeRes.writeHead(404);
       nodeRes.end("Not Found");
     } catch (err) {
+      debug("mcp.http", "handler error", { pathname, method: nodeReq.method, error: String(err) });
       console.error("HTTP handler error:", err);
       nodeRes.writeHead(500);
       nodeRes.end("Internal Server Error");

@@ -438,7 +438,7 @@ export function getDefaultDbPath(indexName: string = "index"): string {
 
   const cacheDir = process.env.XDG_CACHE_HOME || resolve(homedir(), ".cache");
   const qmdCacheDir = resolve(cacheDir, "qmd");
-  try { mkdirSync(qmdCacheDir, { recursive: true }); } catch { }
+  try { mkdirSync(qmdCacheDir, { recursive: true }); } catch (err) { debug("store", "mkdirSync failed for cache dir", { path: qmdCacheDir, error: String(err) }); }
   return resolve(qmdCacheDir, `${indexName}.sqlite`);
 }
 
@@ -626,9 +626,10 @@ function initializeDatabase(db: Database): void {
     loadSqliteVec(db);
     verifySqliteVecLoaded(db);
     _sqliteVecAvailable = true;
-  } catch {
+  } catch (err) {
     // sqlite-vec is optional — vector search won't work but FTS is fine
     _sqliteVecAvailable = false;
+    debug("store.init", "sqlite-vec unavailable, vector search disabled", { error: String(err) });
   }
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");

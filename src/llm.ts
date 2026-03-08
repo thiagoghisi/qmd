@@ -440,6 +440,14 @@ export class LlamaCpp implements LLM {
       return;
     }
 
+    const t0 = Date.now();
+    const unloading = {
+      embedContexts: this.embedContexts.length,
+      rerankContexts: this.rerankContexts.length,
+      models: this.disposeModelsOnInactivity,
+    };
+    debug("llm.idle", "unloading idle resources", unloading);
+
     // Clear timer
     if (this.inactivityTimer) {
       clearTimeout(this.inactivityTimer);
@@ -476,6 +484,7 @@ export class LlamaCpp implements LLM {
       this.rerankModelLoadPromise = null;
     }
 
+    debug("llm.idle", `unload done in ${Date.now() - t0}ms`);
     // Note: We keep llama instance alive - it's lightweight
   }
 
@@ -501,6 +510,7 @@ export class LlamaCpp implements LLM {
     }
 
     this.llamaLoadPromise = (async () => {
+      const t0 = Date.now();
       // Detect available GPU types and use the best one.
       // We can't rely on gpu:"auto" — it returns false even when CUDA is available
       // (likely a binary/build config issue in node-llama-cpp).
@@ -508,12 +518,15 @@ export class LlamaCpp implements LLM {
       const gpuTypes = await getLlamaGpuTypes();
       // Prefer CUDA > Metal > Vulkan > CPU
       const preferred = (["cuda", "metal", "vulkan"] as const).find(g => gpuTypes.includes(g));
+      debug("llm.init", "GPU detection", { gpuTypes, preferred: preferred || "cpu" });
 
       let llama: Llama;
       if (preferred) {
         try {
           llama = await getLlama({ gpu: preferred, logLevel: LlamaLogLevel.error });
-        } catch {
+          debug("llm.init", `GPU initialized: ${preferred}`, { elapsed: Date.now() - t0 });
+        } catch (err) {
+          debug("llm.init", `GPU ${preferred} failed, falling back to CPU`, { error: String(err) });
           llama = await getLlama({ gpu: false, logLevel: LlamaLogLevel.error });
           process.stderr.write(
             `QMD Warning: ${preferred} reported available but failed to initialize. Falling back to CPU.\n`
@@ -521,6 +534,7 @@ export class LlamaCpp implements LLM {
         }
       } else {
         llama = await getLlama({ gpu: false, logLevel: LlamaLogLevel.error });
+        debug("llm.init", "no GPU available, using CPU");
       }
 
       if (!llama.gpu) {
@@ -528,6 +542,7 @@ export class LlamaCpp implements LLM {
           "QMD Warning: no GPU acceleration, running on CPU (slow). Run 'qmd status' for details.\n"
         );
       }
+      debug("llm.init", `done in ${Date.now() - t0}ms`, { gpu: llama.gpu || "cpu", cores: llama.cpuMathCores });
       this.llama = llama;
       return llama;
     })();
@@ -560,12 +575,16 @@ export class LlamaCpp implements LLM {
     }
 
     this.embedModelLoadPromise = (async () => {
+      const t0 = Date.now();
+      debug("llm.load", "embed model start", { uri: this.embedModelUri });
       const llama = await this.ensureLlama();
       const modelPath = await this.resolveModel(this.embedModelUri);
+      debug("llm.load", "embed model resolved", { path: modelPath });
       const model = await llama.loadModel({ modelPath });
       this.embedModel = model;
       // Model loading counts as activity - ping to keep alive
       this.touchActivity();
+      debug("llm.load", `embed model done in ${Date.now() - t0}ms`);
       return model;
     })();
 
@@ -633,20 +652,25 @@ export class LlamaCpp implements LLM {
     }
 
     this.embedContextsCreatePromise = (async () => {
+      const t0 = Date.now();
       const model = await this.ensureEmbedModel();
       // Embed contexts are ~143 MB each (nomic-embed 2048 ctx)
       const n = await this.computeParallelism(150);
       const threads = await this.threadsPerContext(n);
+      debug("llm.context", "creating embed contexts", { target: n, threads });
       for (let i = 0; i < n; i++) {
         try {
           this.embedContexts.push(await model.createEmbeddingContext({
             ...(threads > 0 ? { threads } : {}),
           }));
-        } catch {
+          debug("llm.context", `embed context ${i + 1}/${n} created`);
+        } catch (err) {
+          debug("llm.context", `embed context ${i + 1}/${n} failed`, { error: String(err), created: this.embedContexts.length });
           if (this.embedContexts.length === 0) throw new Error("Failed to create any embedding context");
           break;
         }
       }
+      debug("llm.context", `embed contexts done in ${Date.now() - t0}ms`, { count: this.embedContexts.length });
       this.touchActivity();
       return this.embedContexts;
     })();
@@ -676,10 +700,14 @@ export class LlamaCpp implements LLM {
       }
 
       this.generateModelLoadPromise = (async () => {
+        const t0 = Date.now();
+        debug("llm.load", "generate model start", { uri: this.generateModelUri });
         const llama = await this.ensureLlama();
         const modelPath = await this.resolveModel(this.generateModelUri);
+        debug("llm.load", "generate model resolved", { path: modelPath });
         const model = await llama.loadModel({ modelPath });
         this.generateModel = model;
+        debug("llm.load", `generate model done in ${Date.now() - t0}ms`);
         return model;
       })();
 
@@ -708,12 +736,16 @@ export class LlamaCpp implements LLM {
     }
 
     this.rerankModelLoadPromise = (async () => {
+      const t0 = Date.now();
+      debug("llm.load", "rerank model start", { uri: this.rerankModelUri });
       const llama = await this.ensureLlama();
       const modelPath = await this.resolveModel(this.rerankModelUri);
+      debug("llm.load", "rerank model resolved", { path: modelPath });
       const model = await llama.loadModel({ modelPath });
       this.rerankModel = model;
       // Model loading counts as activity - ping to keep alive
       this.touchActivity();
+      debug("llm.load", `rerank model done in ${Date.now() - t0}ms`);
       return model;
     })();
 
@@ -740,10 +772,12 @@ export class LlamaCpp implements LLM {
 
   private async ensureRerankContexts(): Promise<Awaited<ReturnType<LlamaModel["createRankingContext"]>>[]> {
     if (this.rerankContexts.length === 0) {
+      const t0 = Date.now();
       const model = await this.ensureRerankModel();
       // ~960 MB per context with flash attention at contextSize 2048
       const n = await this.computeParallelism(1000);
       const threads = await this.threadsPerContext(n);
+      debug("llm.context", "creating rerank contexts", { target: n, threads, contextSize: LlamaCpp.RERANK_CONTEXT_SIZE });
       for (let i = 0; i < n; i++) {
         try {
           this.rerankContexts.push(await model.createRankingContext({
@@ -751,14 +785,18 @@ export class LlamaCpp implements LLM {
             flashAttention: true,
             ...(threads > 0 ? { threads } : {}),
           } as any));
-        } catch {
+          debug("llm.context", `rerank context ${i + 1}/${n} created (flashAttention)`);
+        } catch (err) {
+          debug("llm.context", `rerank context ${i + 1}/${n} failed`, { error: String(err), created: this.rerankContexts.length });
           if (this.rerankContexts.length === 0) {
             // Flash attention might not be supported — retry without it
+            debug("llm.context", "retrying rerank context without flashAttention");
             try {
               this.rerankContexts.push(await model.createRankingContext({
                 contextSize: LlamaCpp.RERANK_CONTEXT_SIZE,
                 ...(threads > 0 ? { threads } : {}),
               }));
+              debug("llm.context", "rerank context 1 created (no flashAttention)");
             } catch {
               throw new Error("Failed to create any rerank context");
             }
@@ -766,6 +804,7 @@ export class LlamaCpp implements LLM {
           break;
         }
       }
+      debug("llm.context", `rerank contexts done in ${Date.now() - t0}ms`, { count: this.rerankContexts.length });
     }
     this.touchActivity();
     return this.rerankContexts;
@@ -858,6 +897,7 @@ export class LlamaCpp implements LLM {
             this.touchActivity();
             embeddings.push({ embedding: Array.from(embedding.vector), model: this.embedModelUri });
           } catch (err) {
+            debug("llm.embedBatch", `chunk error`, { index: embeddings.length, textLen: text.length, error: String(err) });
             console.error("Embedding error for text:", err);
             embeddings.push(null);
           }
@@ -881,6 +921,7 @@ export class LlamaCpp implements LLM {
               this.touchActivity();
               results.push({ embedding: Array.from(embedding.vector), model: this.embedModelUri });
             } catch (err) {
+              debug("llm.embedBatch", `chunk error`, { ctxIdx: i, chunkIdx: results.length, textLen: text.length, error: String(err) });
               console.error("Embedding error for text:", err);
               results.push(null);
             }
@@ -1139,9 +1180,12 @@ export class LlamaCpp implements LLM {
   async dispose(): Promise<void> {
     // Prevent double-dispose
     if (this.disposed) {
+      debug("llm.dispose", "already disposed, skipping");
       return;
     }
     this.disposed = true;
+    debug("llm.dispose", "starting disposal");
+    const t0 = Date.now();
 
     // Clear inactivity timer
     if (this.inactivityTimer) {
@@ -1154,8 +1198,14 @@ export class LlamaCpp implements LLM {
     // Note: llama.dispose() can hang indefinitely, so we use a timeout
     if (this.llama) {
       const disposePromise = this.llama.dispose();
-      const timeoutPromise = new Promise<void>((resolve) => setTimeout(resolve, 1000));
+      const timeoutPromise = new Promise<void>((resolve) => {
+        setTimeout(() => {
+          debug("llm.dispose", "llama.dispose() timed out after 1s");
+          resolve();
+        }, 1000);
+      });
       await Promise.race([disposePromise, timeoutPromise]);
+      debug("llm.dispose", `done in ${Date.now() - t0}ms`);
     }
 
     // Clear references
@@ -1254,6 +1304,7 @@ class LLMSession implements ILLMSession {
     this.manager = manager;
     this.name = options.name || "unnamed";
     this.abortController = new AbortController();
+    debug("llm.session", `created: ${this.name}`, { maxDuration: options.maxDuration ?? 600000 });
 
     // Link external abort signal if provided
     if (options.signal) {
@@ -1270,6 +1321,7 @@ class LLMSession implements ILLMSession {
     const maxDuration = options.maxDuration ?? 10 * 60 * 1000; // Default 10 minutes
     if (maxDuration > 0) {
       this.maxDurationTimer = setTimeout(() => {
+        debug("llm.session", `timeout: ${this.name} exceeded ${maxDuration}ms`);
         this.abortController.abort(new Error(`Session "${this.name}" exceeded max duration of ${maxDuration}ms`));
       }, maxDuration);
       this.maxDurationTimer.unref(); // Don't keep process alive
@@ -1294,6 +1346,7 @@ class LLMSession implements ILLMSession {
   release(): void {
     if (this.released) return;
     this.released = true;
+    debug("llm.session", `released: ${this.name}`);
 
     if (this.maxDurationTimer) {
       clearTimeout(this.maxDurationTimer);

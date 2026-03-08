@@ -5,7 +5,8 @@ import { execSync, spawn as nodeSpawn } from "child_process";
 import { fileURLToPath } from "url";
 import { basename, dirname, join as pathJoin, relative as relativePath, resolve as pathResolve } from "path";
 import { parseArgs } from "util";
-import { readFileSync, readdirSync, realpathSync, statSync, existsSync, unlinkSync, writeFileSync, openSync, closeSync, mkdirSync, lstatSync, rmSync, symlinkSync, readlinkSync, copyFileSync } from "fs";
+import { readFileSync, readdirSync, realpathSync, statSync, existsSync, unlinkSync, writeFileSync, openSync, closeSync, mkdirSync, lstatSync, rmSync, symlinkSync, readlinkSync, copyFileSync, appendFileSync } from "fs";
+import { debug } from "../debug.js";
 import { createInterface } from "readline/promises";
 import {
   getPwd,
@@ -2886,6 +2887,23 @@ function parseCLI() {
   };
 }
 
+function logAccess(command: string, args: string[], startTime: number, exitCode?: number): void {
+  try {
+    const cacheDir = process.env.XDG_CACHE_HOME
+      ? resolve(process.env.XDG_CACHE_HOME, "qmd")
+      : resolve(homedir(), ".cache", "qmd");
+    mkdirSync(cacheDir, { recursive: true });
+    const logPath = resolve(cacheDir, "access.log");
+    const elapsed = Date.now() - startTime;
+    const ts = new Date().toISOString();
+    const cmdStr = [command, ...args].join(" ");
+    const status = exitCode !== undefined ? ` exit=${exitCode}` : "";
+    appendFileSync(logPath, `${ts} ${cmdStr} (${elapsed}ms${status})\n`);
+  } catch {
+    // Never fail on logging
+  }
+}
+
 function getSkillInstallDir(globalInstall: boolean): string {
   return globalInstall
     ? resolve(homedir(), ".agents", "skills", "qmd")
@@ -4001,6 +4019,12 @@ if (isMain) {
   enableProductionMode();
 
   const cli = parseCLI();
+  const cliStartTime = Date.now();
+
+  // Log every CLI invocation to ~/.cache/qmd/access.log
+  process.on("exit", (code) => {
+    logAccess(cli.command, process.argv.slice(3), cliStartTime, code);
+  });
 
   if (cli.values.version) {
     await showVersion();

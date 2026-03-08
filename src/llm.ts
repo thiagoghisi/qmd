@@ -10,6 +10,7 @@ import type {
   LlamaEmbeddingContext,
   Token as LlamaToken,
 } from "node-llama-cpp";
+import { debug } from "./debug.js";
 
 type StdoutChunk = string | Uint8Array;
 type WriteCallback = (err?: Error | null) => void;
@@ -1271,6 +1272,8 @@ export class LlamaCpp implements LLM {
   async embed(text: string, options: EmbedOptions = {}): Promise<EmbeddingResult | null> {
     // Ping activity at start to keep models alive during this operation
     this.touchActivity();
+    const t0 = Date.now();
+    debug("llm.embed", "call", { textLen: text.length, model: this.embedModelUri });
 
     try {
       const context = await this.ensureEmbedContext();
@@ -1288,6 +1291,7 @@ export class LlamaCpp implements LLM {
         model: options.model ?? this.embedModelUri,
       };
     } catch (error) {
+      debug("llm.embed", `ERROR in ${Date.now() - t0}ms`, { error: String(error) });
       console.error("Embedding error:", error);
       return null;
     }
@@ -1301,6 +1305,8 @@ export class LlamaCpp implements LLM {
     if (this._ciMode) throw new Error("LLM operations are disabled in CI (set CI=true)");
     // Ping activity at start to keep models alive during this operation
     this.touchActivity();
+    const t0 = Date.now();
+    debug("llm.embedBatch", "call", { count: texts.length, model: this.embedModelUri });
 
     if (texts.length === 0) return [];
 
@@ -1357,8 +1363,11 @@ export class LlamaCpp implements LLM {
         })
       );
 
-      return chunkResults.flat();
+      const flat = chunkResults.flat();
+      debug("llm.embedBatch", `done in ${Date.now() - t0}ms`, { count: texts.length, successes: flat.filter(Boolean).length });
+      return flat;
     } catch (error) {
+      debug("llm.embedBatch", `ERROR in ${Date.now() - t0}ms`, { error: String(error) });
       console.error("Batch embedding error:", error);
       return texts.map(() => null);
     }
@@ -1429,6 +1438,8 @@ export class LlamaCpp implements LLM {
     if (this._ciMode) throw new Error("LLM operations are disabled in CI (set CI=true)");
     // Ping activity at start to keep models alive during this operation
     this.touchActivity();
+    const t0 = Date.now();
+    debug("llm.expand", "call", { query: query.slice(0, 100), model: "generate" });
 
     const llama = await this.ensureLlama();
     await this.ensureGenerateModel();
@@ -1496,15 +1507,21 @@ export class LlamaCpp implements LLM {
 
       // Filter out lex entries if not requested
       const filtered = includeLexical ? queryables : queryables.filter(q => q.type !== 'lex');
-      if (filtered.length > 0) return filtered;
+      if (filtered.length > 0) {
+        debug("llm.expand", `done in ${Date.now() - t0}ms`, { results: filtered.length, types: filtered.map(q => q.type) });
+        return filtered;
+      }
 
       const fallback: Queryable[] = [
         { type: 'hyde', text: `Information about ${query}` },
         { type: 'lex', text: query },
         { type: 'vec', text: query },
       ];
-      return includeLexical ? fallback : fallback.filter(q => q.type !== 'lex');
+      const fb = includeLexical ? fallback : fallback.filter(q => q.type !== 'lex');
+      debug("llm.expand", `fallback (no valid output) in ${Date.now() - t0}ms`, { results: fb.length });
+      return fb;
     } catch (error) {
+      debug("llm.expand", `ERROR in ${Date.now() - t0}ms`, { error: String(error) });
       console.error("Structured query expansion failed:", error);
       // Fallback to original query
       const fallback: Queryable[] = [{ type: 'vec', text: query }];
@@ -1529,6 +1546,8 @@ export class LlamaCpp implements LLM {
     if (this._ciMode) throw new Error("LLM operations are disabled in CI (set CI=true)");
     // Ping activity at start to keep models alive during this operation
     this.touchActivity();
+    const t0 = Date.now();
+    debug("llm.rerank", "call", { query: query.slice(0, 80), docs: documents.length, model: this.rerankModelUri });
 
     const contexts = await this.ensureRerankContexts();
     const model = await this.ensureRerankModel();
@@ -1609,6 +1628,8 @@ export class LlamaCpp implements LLM {
         });
       }
     }
+
+    debug("llm.rerank", `done in ${Date.now() - t0}ms`, { docs: documents.length, contexts: contexts.length, topScore: results[0]?.score, bottomScore: results[results.length - 1]?.score });
 
     return {
       results,

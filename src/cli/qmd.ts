@@ -2387,12 +2387,29 @@ function resolveCollectionFilter(raw: string | string[] | undefined, useDefaults
   const validated: string[] = [];
   for (const name of names) {
     const coll = getCollectionFromYaml(name);
-    if (!coll) {
+    if (coll) {
+      validated.push(name);
+      continue;
+    }
+    // Fuzzy matching for LLM agents that pass old names, partial names, or filesystem paths:
+    //   "career" → "career-development" (prefix match on collection name)
+    //   "_kindle_second-brain" → "kindle-highlights" (filesystem path match)
+    //   "therapy" → "therapy-notes" (prefix match)
+    const allCollections = yamlListCollections();
+    const normalized = name.replace(/^_+/, "").replace(/_/g, "-").toLowerCase();
+    const match = allCollections.find(c => {
+      if (c.name === normalized) return true;
+      if (c.name.startsWith(normalized + "-") || c.name.startsWith(normalized)) return true;
+      const pathBase = c.path.split("/").pop()?.replace(/^_+/, "").replace(/_/g, "-").toLowerCase() || "";
+      return pathBase === normalized || pathBase.startsWith(normalized);
+    });
+    if (match) {
+      validated.push(match.name);
+    } else {
       console.error(`Collection not found: ${name}`);
       closeDb();
       process.exit(1);
     }
-    validated.push(name);
   }
   return validated;
 }
@@ -2766,6 +2783,7 @@ function parseCLI() {
       json: { type: "boolean" },
       explain: { type: "boolean" },
       collection: { type: "string", short: "c", multiple: true },  // Filter by collection(s)
+      container: { type: "string", multiple: true },  // Alias for --collection (LLM agents sometimes use this)
       // Collection options
       name: { type: "string" },  // collection name
       mask: { type: "string" },  // glob pattern
@@ -2841,7 +2859,15 @@ function parseCLI() {
     limit: isAll ? 100000 : (values.n ? parseInt(String(values.n), 10) || defaultLimit : defaultLimit),
     minScore: values["min-score"] ? parseFloat(String(values["min-score"])) || 0 : 0,
     all: isAll,
-    collection: values.collection as string[] | undefined,
+    collection: (() => {
+      // Merge --container into --collection (LLM agents sometimes hallucinate --container)
+      const containerAlias = values.container as string | string[] | undefined;
+      const collectionRaw = values.collection as string[] | undefined;
+      const merged = containerAlias
+        ? [...(collectionRaw || []), ...(Array.isArray(containerAlias) ? containerAlias : [containerAlias])]
+        : collectionRaw;
+      return merged?.length ? merged : undefined;
+    })(),
     lineNumbers: !!values["line-numbers"],
     candidateLimit: values["candidate-limit"] ? parseInt(String(values["candidate-limit"]), 10) : undefined,
     skipRerank: !!values["no-rerank"],

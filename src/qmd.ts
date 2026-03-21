@@ -1987,18 +1987,41 @@ function outputResults(results: { file: string; displayPath: string; title: stri
 
 // Resolve -c collection filter: supports single string, array, or undefined.
 // Returns validated collection names (exits on unknown collection).
+// Includes fuzzy matching: if exact name not found, tries matching by path suffix
+// (LLM agents sometimes pass filesystem directory names like "_kindle_second-brain").
 function resolveCollectionFilter(raw: string | string[] | undefined): string[] {
   if (!raw) return [];
   const names = Array.isArray(raw) ? raw : [raw];
   const validated: string[] = [];
   for (const name of names) {
     const coll = getCollectionFromYaml(name);
-    if (!coll) {
+    if (coll) {
+      validated.push(name);
+      continue;
+    }
+    // Fuzzy matching for LLM agents that pass old names, partial names, or filesystem paths:
+    //   "career" → "career-development" (prefix match on collection name)
+    //   "_kindle_second-brain" → "kindle-highlights" (filesystem path match)
+    //   "therapy" → "therapy-notes" (prefix match)
+    const allCollections = yamlListCollections();
+    const normalized = name.replace(/^_+/, "").replace(/_/g, "-").toLowerCase();
+    const match = allCollections.find(c => {
+      // Exact match on normalized name
+      if (c.name === normalized) return true;
+      // Collection name starts with the input (e.g., "career" matches "career-development")
+      if (c.name.startsWith(normalized + "-") || c.name.startsWith(normalized)) return true;
+      // Filesystem path match (e.g., "_kindle_second-brain" matches by directory name)
+      const pathBase = c.path.split("/").pop()?.replace(/^_+/, "").replace(/_/g, "-").toLowerCase() || "";
+      return pathBase === normalized || pathBase.startsWith(normalized);
+    });
+    if (match) {
+      debug("cli", `collection fuzzy match: "${name}" → "${match.name}"`);
+      validated.push(match.name);
+    } else {
       console.error(`Collection not found: ${name}`);
       closeDb();
       process.exit(1);
     }
-    validated.push(name);
   }
   return validated;
 }
@@ -2201,6 +2224,7 @@ function parseCLI() {
       files: { type: "boolean" },
       json: { type: "boolean" },
       collection: { type: "string", short: "c", multiple: true },  // Filter by collection(s)
+      container: { type: "string", multiple: true },  // Alias for --collection (LLM agents sometimes use this)
       // Collection options
       name: { type: "string" },  // collection name
       mask: { type: "string" },  // glob pattern
@@ -2245,13 +2269,20 @@ function parseCLI() {
   const defaultLimit = (format === "files" || format === "json") ? 20 : 5;
   const isAll = !!values.all;
 
+  // Merge --container into --collection (LLM agents sometimes hallucinate --container)
+  const containerAlias = values.container as string | string[] | undefined;
+  const collectionRaw = values.collection as string[] | undefined;
+  const mergedCollection = containerAlias
+    ? [...(collectionRaw || []), ...(Array.isArray(containerAlias) ? containerAlias : [containerAlias])]
+    : collectionRaw;
+
   const opts: OutputOptions = {
     format,
     full: !!values.full,
     limit: isAll ? 100000 : (values.n ? parseInt(String(values.n), 10) || defaultLimit : defaultLimit),
     minScore: values["min-score"] ? parseFloat(String(values["min-score"])) || 0 : 0,
     all: isAll,
-    collection: values.collection as string[] | undefined,
+    collection: mergedCollection?.length ? mergedCollection : undefined,
     lineNumbers: !!values["line-numbers"],
   };
 

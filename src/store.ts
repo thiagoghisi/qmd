@@ -2088,11 +2088,16 @@ export async function searchVec(db: Database, query: string, model: string, limi
   // See: https://github.com/tobi/qmd/pull/23
 
   // Step 1: Get vector matches from sqlite-vec (no JOINs allowed)
+  // When filtering by collection, fetch more candidates since sqlite-vec searches
+  // globally and we post-filter. A small collection (e.g., 725 files out of 100K+)
+  // needs a wider net to find matches within that collection.
+  // Keep multiplier modest to avoid GPU OOM on Metal (Mac Mini 8GB).
+  const kMultiplier = collectionName ? 8 : 3;
   const vecResults = db.prepare(`
     SELECT hash_seq, distance
     FROM vectors_vec
     WHERE embedding MATCH ? AND k = ?
-  `).all(new Float32Array(embedding), limit * 3) as { hash_seq: string; distance: number }[];
+  `).all(new Float32Array(embedding), limit * kMultiplier) as { hash_seq: string; distance: number }[];
 
   debug("vec", `sqlite-vec returned ${vecResults.length} matches`, vecResults.length > 0 ? { bestDist: vecResults[0]!.distance, worstDist: vecResults[vecResults.length - 1]!.distance } : undefined);
   if (vecResults.length === 0) return [];

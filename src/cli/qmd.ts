@@ -2773,6 +2773,7 @@ function parseCLI() {
       yes: { type: "boolean" },
       // Search options
       n: { type: "string" },
+      limit: { type: "string" },  // Alias for -n (LLM agents sometimes use --limit)
       "min-score": { type: "string" },
       all: { type: "boolean" },
       full: { type: "boolean" },
@@ -2856,7 +2857,7 @@ function parseCLI() {
   const opts: OutputOptions = {
     format,
     full: !!values.full,
-    limit: isAll ? 100000 : (values.n ? parseInt(String(values.n), 10) || defaultLimit : defaultLimit),
+    limit: isAll ? 100000 : (values.n ? parseInt(String(values.n), 10) || defaultLimit : values.limit ? parseInt(String(values.limit), 10) || defaultLimit : defaultLimit),
     minScore: values["min-score"] ? parseFloat(String(values["min-score"])) || 0 : 0,
     all: isAll,
     collection: (() => {

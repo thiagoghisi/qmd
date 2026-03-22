@@ -295,13 +295,15 @@ export async function startDaemonServer(): Promise<void> {
           sendStderr(`Expanded to ${queries.length} queries, searching vectors...\n`);
 
           // Collect results
+          // Pass single collection name to searchVec for wider k when filtering
+          const singleCollection = collection.length === 1 ? collection[0] : undefined;
           const allResults = new Map<string, any>();
           for (const q of queries) {
-            // ExpandedQuery is now { type, query } — pass the string
+            // ExpandedQuery is now { type, query } — pass the string + singleCollection for wider k
             const queryText = typeof q === 'string' ? q : q.query;
-            const vecResults = await store.searchVec(queryText, DEFAULT_EMBED_MODEL, limit);
+            const vecResults = await store.searchVec(queryText, DEFAULT_EMBED_MODEL, limit, singleCollection);
             for (const r of vecResults) {
-              if (collection.length > 0 && !collection.includes(r.collectionName)) continue;
+              if (collection.length > 1 && !collection.includes(r.collectionName)) continue;
               const existing = allResults.get(r.filepath);
               if (!existing || r.score > existing.score) {
                 allResults.set(r.filepath, r);
@@ -397,10 +399,11 @@ export async function startDaemonServer(): Promise<void> {
             }
 
             if (hasVectors) {
+              const querySingleCollection = collection.length === 1 ? collection[0] : undefined;
               for (const q of vectorQueries) {
                 searchPromises.push((async () => {
-                  const vecResults = await store.searchVec(q, DEFAULT_EMBED_MODEL, 20)
-                    .then((r: any[]) => r.filter((r: any) => collection.length === 0 || collection.includes(r.collectionName)));
+                  const vecResults = await store.searchVec(q, DEFAULT_EMBED_MODEL, 20, querySingleCollection)
+                    .then((r: any[]) => r.filter((r: any) => collection.length <= 1 || collection.includes(r.collectionName)));
                   if (vecResults.length > 0) {
                     rankedLists.push(vecResults.map((r: any) => {
                       hashMap.set(r.filepath, r.hash);

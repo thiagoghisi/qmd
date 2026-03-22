@@ -1033,7 +1033,7 @@ export class LlamaCpp implements LLM {
       // DO NOT use greedy decoding (temp=0) - causes infinite loops
       const result = await session.prompt(prompt, {
         grammar,
-        maxTokens: 200,  // 6 lines × ~30 tokens each; was 600 which allowed repetition loops
+        maxTokens: 350,  // 10 diverse lines × ~30 tokens each; was 600 which allowed repetition loops
         temperature: 0.7,
         topK: 20,
         topP: 0.8,
@@ -1063,10 +1063,20 @@ export class LlamaCpp implements LLM {
         return { type: type as QueryType, text };
       }).filter((q): q is Queryable => q !== null);
 
-      // Filter out lex entries if not requested, and cap at 6 expansions max
-      // (the LLM sometimes enters repetition loops generating 30+ near-identical hyde entries)
-      const MAX_EXPANSIONS = 6;
-      const filtered = (includeLexical ? queryables : queryables.filter(q => q.type !== 'lex')).slice(0, MAX_EXPANSIONS);
+      // Filter out lex entries if not requested, deduplicate near-identical expansions,
+      // then cap at 10. The LLM sometimes enters repetition loops generating 30+ copies
+      // of the same hyde text — dedup catches these while preserving diverse expansions.
+      const MAX_EXPANSIONS = 10;
+      const withLex = includeLexical ? queryables : queryables.filter(q => q.type !== 'lex');
+      const seen = new Set<string>();
+      const deduped = withLex.filter(q => {
+        // Normalize: lowercase, collapse whitespace, trim to first 80 chars for fuzzy match
+        const key = q.text.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 80);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      const filtered = deduped.slice(0, MAX_EXPANSIONS);
       if (filtered.length > 0) {
         debug("llm.expand", `done in ${Date.now() - t0}ms`, { results: filtered.length, types: filtered.map(q => q.type) });
         return filtered;

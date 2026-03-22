@@ -352,7 +352,9 @@ export async function startDaemonServer(): Promise<void> {
 
         try {
           // Replicate the querySearch pipeline from qmd.ts
-          const initialFts = store.searchFTS(query, 20)
+          // Pass single collection to searchFTS for SQL-level filtering (100K → 725 docs)
+          const singleCollectionFts = collection.length === 1 ? collection[0] : undefined;
+          const initialFts = store.searchFTS(query, 20, singleCollectionFts)
             .filter((r: any) => collection.length === 0 || collection.includes(r.collectionName));
 
           const hasVectors = !!store.db.prepare(
@@ -384,7 +386,7 @@ export async function startDaemonServer(): Promise<void> {
             const searchPromises: Promise<void>[] = [];
 
             for (const q of ftsQueries) {
-              const ftsResults = store.searchFTS(q, 20)
+              const ftsResults = store.searchFTS(q, 20, singleCollectionFts)
                 .filter((r: any) => collection.length === 0 || collection.includes(r.collectionName));
               if (ftsResults.length > 0) {
                 rankedLists.push(ftsResults.map((r: any) => {

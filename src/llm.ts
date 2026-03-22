@@ -1033,13 +1033,13 @@ export class LlamaCpp implements LLM {
       // DO NOT use greedy decoding (temp=0) - causes infinite loops
       const result = await session.prompt(prompt, {
         grammar,
-        maxTokens: 600,
+        maxTokens: 200,  // 6 lines × ~30 tokens each; was 600 which allowed repetition loops
         temperature: 0.7,
         topK: 20,
         topP: 0.8,
         repeatPenalty: {
-          lastTokens: 64,
-          presencePenalty: 0.5,
+          lastTokens: 128,
+          presencePenalty: 1.0,
         },
       });
 
@@ -1063,8 +1063,10 @@ export class LlamaCpp implements LLM {
         return { type: type as QueryType, text };
       }).filter((q): q is Queryable => q !== null);
 
-      // Filter out lex entries if not requested
-      const filtered = includeLexical ? queryables : queryables.filter(q => q.type !== 'lex');
+      // Filter out lex entries if not requested, and cap at 6 expansions max
+      // (the LLM sometimes enters repetition loops generating 30+ near-identical hyde entries)
+      const MAX_EXPANSIONS = 6;
+      const filtered = (includeLexical ? queryables : queryables.filter(q => q.type !== 'lex')).slice(0, MAX_EXPANSIONS);
       if (filtered.length > 0) {
         debug("llm.expand", `done in ${Date.now() - t0}ms`, { results: filtered.length, types: filtered.map(q => q.type) });
         return filtered;

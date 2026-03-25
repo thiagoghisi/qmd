@@ -2761,6 +2761,7 @@ function parseCLI() {
       force: { type: "boolean", short: "f" },
       // Daemon options
       warmup: { type: "boolean" },
+      "no-warmup": { type: "boolean" },
       "max-docs-per-batch": { type: "string" },
       "max-batch-mb": { type: "string" },
       // Update options
@@ -3271,7 +3272,7 @@ function showHelp(): void {
   console.log("  qmd skills list/get/path      - List and retrieve bundled runtime skills");
   console.log("  qmd skill show/install        - Show or install the QMD skill");
   console.log("  qmd mcp                       - Start the MCP server (stdio transport for AI agents)");
-  console.log("  qmd daemon start [--warmup]   - Start background daemon (keeps models warm)");
+  console.log("  qmd daemon start [--no-warmup] - Start background daemon (warmup is default)");
   console.log("  qmd daemon stop               - Stop the daemon");
   console.log("  qmd daemon status             - Show daemon status");
   console.log("  qmd daemon warmup             - Pre-load all LLM models");
@@ -4574,10 +4575,12 @@ if (isMain) {
       }
 
       const subcommand = cli.args[0];
-      // Support "qmd daemon start warmup" as alias for "qmd daemon start --warmup"
-      if (subcommand === "start" && cli.args[1] === "warmup") {
-        (cli.values as any).warmup = true;
-      }
+      // Warmup is the default for "daemon start". Use --no-warmup to skip.
+      // Also support "qmd daemon start warmup" as positional alias.
+      const shouldWarmup = cli.values["no-warmup"]
+        ? false
+        : (cli.values.warmup || subcommand === "start" || cli.args[1] === "warmup");
+      (cli.values as any).warmup = shouldWarmup;
       switch (subcommand) {
         case "start": {
           if (isDaemonRunning()) {
@@ -4715,7 +4718,7 @@ if (isMain) {
         }
 
         default:
-          console.error("Usage: qmd daemon <start [--warmup]|stop|status|warmup>");
+          console.error("Usage: qmd daemon <start [--no-warmup]|stop|status|warmup>");
           process.exit(1);
       }
       break;

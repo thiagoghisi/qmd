@@ -48,8 +48,13 @@ export function isDaemonRunning(): boolean {
     const pid = parseInt(readFileSync(PID_FILE, "utf-8").trim(), 10);
     // Check if process is alive (signal 0 = just check)
     process.kill(pid, 0);
-    // Also check socket exists
-    return existsSync(SOCKET_PATH);
+    // Process alive — check socket
+    if (existsSync(SOCKET_PATH)) return true;
+    // Process alive but socket missing — zombie daemon.
+    // Kill it so a fresh start can recreate the socket.
+    try { process.kill(pid, "SIGTERM"); } catch {}
+    cleanupStaleFiles();
+    return false;
   } catch {
     // Process not running - clean up stale files
     cleanupStaleFiles();

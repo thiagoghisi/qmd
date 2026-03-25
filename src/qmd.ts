@@ -2793,6 +2793,10 @@ if (fileURLToPath(import.meta.url) === process.argv[1] || process.argv[1]?.endsW
       }
 
       const subcommand = cli.args[0];
+      // Support "qmd daemon start warmup" as alias for "qmd daemon start --warmup"
+      if (subcommand === "start" && cli.args[1] === "warmup") {
+        (cli.values as any).warmup = true;
+      }
       switch (subcommand) {
         case "start": {
           if (isDaemonRunning()) {

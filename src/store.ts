@@ -1060,6 +1060,7 @@ export type CollectionInfo = {
 
 export type IndexStatus = {
   totalDocuments: number;
+  totalEmbeddings: number;
   needsEmbedding: number;
   hasVectorIndex: boolean;
   collections: CollectionInfo[];
@@ -2694,9 +2695,13 @@ export function getStatus(db: Database): IndexStatus {
   const totalDocs = (db.prepare(`SELECT COUNT(*) as c FROM documents WHERE active = 1`).get() as { c: number }).c;
   const needsEmbedding = getHashesNeedingEmbedding(db);
   const hasVectors = !!db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
+  const totalEmbeddings = hasVectors
+    ? (db.prepare(`SELECT COUNT(*) as c FROM content_vectors`).get() as { c: number }).c
+    : 0;
 
   return {
     totalDocuments: totalDocs,
+    totalEmbeddings,
     needsEmbedding,
     hasVectorIndex: hasVectors,
     collections,

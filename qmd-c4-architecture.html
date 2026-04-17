@@ -1,0 +1,896 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>qmd C4 Architecture</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: #161b22;
+      --panel-2: #1f2630;
+      --border: #30363d;
+      --text: #c9d1d9;
+      --muted: #8b949e;
+      --blue: #58a6ff;
+      --green: #3fb950;
+      --purple: #a371f7;
+      --orange: #d29922;
+      --red: #f85149;
+      --teal: #39c5cf;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+
+    .layout {
+      display: flex;
+      min-height: 100vh;
+    }
+
+    nav {
+      width: 300px;
+      position: fixed;
+      inset: 0 auto 0 0;
+      overflow-y: auto;
+      padding: 24px 18px 32px;
+      background: var(--panel);
+      border-right: 1px solid var(--border);
+    }
+
+    nav h1 {
+      color: var(--blue);
+      font-size: 1.35rem;
+      margin-bottom: 6px;
+    }
+
+    nav .subtitle {
+      color: var(--muted);
+      font-size: 0.82rem;
+      margin-bottom: 20px;
+    }
+
+    nav .section-title {
+      color: var(--muted);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin: 18px 0 10px 8px;
+    }
+
+    nav ul { list-style: none; }
+
+    nav a {
+      display: block;
+      color: var(--text);
+      text-decoration: none;
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 0.92rem;
+    }
+
+    nav a:hover {
+      background: var(--panel-2);
+      color: var(--blue);
+    }
+
+    main {
+      margin-left: 300px;
+      width: calc(100% - 300px);
+      padding: 40px 48px 72px;
+    }
+
+    .hero h1 {
+      font-size: 2.5rem;
+      margin-bottom: 8px;
+      background: linear-gradient(90deg, var(--blue), var(--teal));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .hero p {
+      max-width: 980px;
+      color: var(--muted);
+    }
+
+    .badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 5px 10px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--panel);
+      font-size: 0.78rem;
+    }
+
+    .b-blue { color: var(--blue); }
+    .b-green { color: var(--green); }
+    .b-purple { color: var(--purple); }
+    .b-orange { color: var(--orange); }
+    .b-red { color: var(--red); }
+    .b-teal { color: var(--teal); }
+
+    section {
+      margin-top: 52px;
+      scroll-margin-top: 16px;
+    }
+
+    h2 {
+      color: var(--blue);
+      font-size: 1.6rem;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 10px;
+      margin-bottom: 12px;
+    }
+
+    h3 {
+      color: var(--green);
+      font-size: 1.14rem;
+      margin: 24px 0 12px;
+    }
+
+    p.description {
+      max-width: 1000px;
+      color: var(--muted);
+      margin-bottom: 16px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      gap: 14px;
+      margin: 18px 0;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px 18px;
+    }
+
+    .card h4 {
+      margin-bottom: 8px;
+      color: var(--text);
+    }
+
+    .card p, .card li {
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .card ul { margin-left: 18px; }
+
+    pre {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px;
+      overflow-x: auto;
+      font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+      font-size: 12.5px;
+      line-height: 1.45;
+      color: var(--text);
+      margin: 14px 0 18px;
+    }
+
+    code {
+      background: var(--panel-2);
+      border-radius: 6px;
+      padding: 0.14rem 0.35rem;
+      font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+      font-size: 0.9em;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0;
+      font-size: 0.92rem;
+    }
+
+    th, td {
+      border: 1px solid var(--border);
+      padding: 12px 10px;
+      vertical-align: top;
+    }
+
+    th {
+      background: var(--panel-2);
+      color: var(--blue);
+      text-align: left;
+    }
+
+    .callout {
+      background: rgba(88, 166, 255, 0.08);
+      border: 1px solid rgba(88, 166, 255, 0.22);
+      border-left: 4px solid var(--blue);
+      border-radius: 10px;
+      padding: 14px 16px;
+      margin: 16px 0;
+    }
+
+    .callout strong { color: var(--blue); }
+
+    footer {
+      margin-top: 44px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    @media (max-width: 980px) {
+      .layout { display: block; }
+      nav { position: static; width: 100%; height: auto; }
+      main { margin-left: 0; width: 100%; padding: 28px 20px 60px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <nav>
+      <h1>qmd</h1>
+      <div class="subtitle">Self-contained C4 architecture</div>
+
+      <div class="section-title">Overview</div>
+      <ul>
+        <li><a href="#summary">Executive summary</a></li>
+        <li><a href="#principle">Key architectural truth</a></li>
+      </ul>
+
+      <div class="section-title">C4 Levels</div>
+      <ul>
+        <li><a href="#level1">1. System context</a></li>
+        <li><a href="#level2">2. Containers</a></li>
+        <li><a href="#level3">3. Components</a></li>
+        <li><a href="#level4">4. Code / modules</a></li>
+      </ul>
+
+      <div class="section-title">Core Models</div>
+      <ul>
+        <li><a href="#content-model">Content model</a></li>
+        <li><a href="#search-model">Search model</a></li>
+        <li><a href="#config-model">Collection/config model</a></li>
+      </ul>
+
+      <div class="section-title">Runtime Flows</div>
+      <ul>
+        <li><a href="#index-flow">Indexing flow</a></li>
+        <li><a href="#query-flow">Hybrid query flow</a></li>
+        <li><a href="#daemon-flow">Daemon / MCP flow</a></li>
+      </ul>
+
+      <div class="section-title">Judgment</div>
+      <ul>
+        <li><a href="#decisions">Key decisions</a></li>
+        <li><a href="#contextual-retrieval">Contextual retrieval fit</a></li>
+      </ul>
+    </nav>
+
+    <main>
+      <div class="hero">
+        <h1>🔎 qmd</h1>
+        <p>
+          qmd is a local-first search runtime for markdown corpora. Files on disk stay the source of truth. SQLite, FTS5, sqlite-vec, and local GGUF models power retrieval. The strongest architectural move is not “hybrid search” in the abstract. It is the concrete pipeline: BM25 probe, typed query expansion, backend routing, reciprocal-rank fusion, chunk reranking, and score blending.
+        </p>
+        <div class="badges">
+          <span class="badge b-blue">CLI</span>
+          <span class="badge b-green">MCP</span>
+          <span class="badge b-purple">SQLite + FTS5</span>
+          <span class="badge b-orange">sqlite-vec</span>
+          <span class="badge b-teal">node-llama-cpp</span>
+          <span class="badge b-red">Daemon + warm models</span>
+        </div>
+      </div>
+
+      <section id="summary">
+        <h2>Executive summary</h2>
+        <p class="description">
+          qmd is not a brain OS and it is not a wiki. It is a retrieval engine with a strong local-first stance. Markdown files live in collections on disk. A SQLite store builds two parallel access paths: full-document lexical search and chunk-level vector search. On top of that, qmd adds typed LLM query expansion, reranking, daemonized warm models, and agent access through MCP.
+        </p>
+
+        <pre>
+┌────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                           qmd                                              │
+├────────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                            │
+│   markdown collections on disk                                                             │
+│            │                                                                               │
+│            ▼                                                                               │
+│   ┌──────────────────────┐     ┌─────────────────────────────┐                             │
+│   │ YAML config          │ --> │ Store / SQLite index        │                             │
+│   │ collections +        │     │                             │                             │
+│   │ path contexts        │     │ - content                   │                             │
+│   └──────────────────────┘     │ - documents                 │                             │
+│                                │ - documents_fts             │                             │
+│                                │ - content_vectors           │                             │
+│                                │ - vectors_vec               │                             │
+│                                │ - llm_cache                 │                             │
+│                                └──────────────┬──────────────┘                             │
+│                                               │                                            │
+│                         ┌─────────────────────┼──────────────────────┐                     │
+│                         │                     │                      │                     │
+│                         ▼                     ▼                      ▼                     │
+│                ┌────────────────┐   ┌────────────────┐   ┌────────────────────┐          │
+│                │ CLI            │   │ Daemon         │   │ MCP Server          │          │
+│                │ human surface  │   │ warm models    │   │ agent surface       │          │
+│                └────────────────┘   └────────────────┘   └────────────────────┘          │
+│                                               │                                            │
+│                                               ▼                                            │
+│                                 local LLM retrieval pipeline                               │
+│                                 BM25 probe -> expansion -> routing -> RRF -> rerank       │
+│                                                                                            │
+└────────────────────────────────────────────────────────────────────────────────────────────┘
+        </pre>
+
+        <div class="callout">
+          <strong>The single most important fact:</strong> BM25 is document-level. Vectors are chunk-level. That asymmetry is one of qmd’s biggest strengths today and one of its most important constraints for future contextual retrieval work.
+        </div>
+      </section>
+
+      <section id="principle">
+        <h2>Key architectural truth</h2>
+        <p class="description">
+          qmd is built around a pragmatic belief: retrieval quality improves more from a disciplined, local-first, debuggable pipeline than from blindly throwing more vector magic at the problem.
+        </p>
+
+        <div class="grid">
+          <div class="card">
+            <h4>Lexical remains first-class</h4>
+            <p>FTS5 is not a fallback. It is a foundational retrieval path and the first probe in the hybrid pipeline.</p>
+          </div>
+          <div class="card">
+            <h4>LLMs are used surgically</h4>
+            <p>Expansion and reranking are there, but gated. Strong BM25 signals can skip expensive expansion altogether.</p>
+          </div>
+          <div class="card">
+            <h4>Files remain primary</h4>
+            <p>The store is derived. Source markdown on disk remains the truth that can always be inspected and reindexed.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="level1">
+        <h2>C4 Level 1 — System context</h2>
+        <p class="description">
+          The outer boundary around qmd. What goes in, who uses it, and what systems sit around it.
+        </p>
+
+        <pre>
+                                   ┌─────────────────────────┐
+                                   │ Human user / operator   │
+                                   │ CLI, shell, scripts     │
+                                   └───────────┬─────────────┘
+                                               │
+                                               │ asks / manages
+                                               ▼
+┌────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                           qmd                                              │
+│                         local-first markdown search runtime                                 │
+└────────────────────────────────────────────────────────────────────────────────────────────┘
+             ▲                                  ▲                                   ▲
+             │                                  │                                   │
+             │ indexes                          │ serves                            │ uses
+             │                                  │                                   │
+             │                                  │                                   │
+┌─────────────────────────┐     ┌────────────────────────────┐        ┌─────────────────────────┐
+│ Markdown collections    │     │ AI agents / MCP clients    │        │ Local GGUF models       │
+│ notes, books, logs,     │     │ Claude Code, OpenClaw,     │        │ embedding, expansion,   │
+│ transcripts, exports    │     │ custom agents              │        │ reranking               │
+└─────────────────────────┘     └────────────────────────────┘        └─────────────────────────┘
+             ▲                                  ▲                                   ▲
+             │                                  │                                   │
+             │ configured by                    │ accelerated by                     │ persisted in
+             │                                  │                                   │
+             ▼                                  ▼                                   ▼
+┌─────────────────────────┐     ┌────────────────────────────┐        ┌─────────────────────────┐
+│ YAML collection config  │     │ qmd daemon                │        │ SQLite store            │
+│ ~/.config/qmd/*.yml     │     │ warm LLM models + socket  │        │ FTS, vectors, cache     │
+└─────────────────────────┘     └────────────────────────────┘        └─────────────────────────┘
+        </pre>
+
+        <table>
+          <thead>
+            <tr><th>Actor / System</th><th>Role</th><th>Why it matters</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Human operator</td><td>Creates collections, runs queries, debugs output</td><td>qmd is designed to stay inspectable from the shell</td></tr>
+            <tr><td>MCP client / AI agent</td><td>Calls search and retrieval tools</td><td>qmd doubles as an agent retrieval substrate</td></tr>
+            <tr><td>Markdown collections</td><td>Source corpus</td><td>Files on disk remain the primary truth</td></tr>
+            <tr><td>YAML config</td><td>Collection registry + path contexts</td><td>Moved out of SQLite to stay human-readable and versionable</td></tr>
+            <tr><td>Local GGUF models</td><td>Embeddings, expansion, reranking</td><td>Keep semantic retrieval local-first</td></tr>
+            <tr><td>SQLite store</td><td>Derived retrieval index</td><td>Holds document metadata, FTS, vectors, cache, and status</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="level2">
+        <h2>C4 Level 2 — Containers</h2>
+        <p class="description">
+          The main runtime containers and the responsibilities they carry.
+        </p>
+
+        <pre>
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                           qmd Containers                                              │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                                        │
+│  ┌────────────────────┐    ┌────────────────────┐    ┌─────────────────────────┐                      │
+│  │ 1. CLI             │    │ 2. MCP Server      │    │ 3. Daemon               │                      │
+│  │ shell interface    │    │ agent-facing tools │    │ warm model process      │                      │
+│  └──────────┬─────────┘    └──────────┬─────────┘    └─────────────┬───────────┘                      │
+│             │                         │                             │                                  │
+│             └──────────────┬──────────┴───────────────┬────────────┘                                  │
+│                            ▼                          ▼                                               │
+│                  ┌────────────────────────────┐  ┌────────────────────────────┐                        │
+│                  │ 4. Store / Retrieval Core  │  │ 5. LLM Layer               │                        │
+│                  │ schema, FTS, vectors,      │  │ node-llama-cpp             │                        │
+│                  │ chunking, query logic      │  │ embed / expand / rerank    │                        │
+│                  └──────────────┬─────────────┘  └──────────────┬─────────────┘                        │
+│                                 │                               │                                      │
+│                                 ▼                               ▼                                      │
+│                  ┌────────────────────────────┐  ┌────────────────────────────┐                        │
+│                  │ 6. SQLite Store            │  │ 7. Model Cache             │                        │
+│                  │ documents, FTS, vec, cache │  │ GGUF downloads + hot state │                        │
+│                  └──────────────┬─────────────┘  └────────────────────────────┘                        │
+│                                 │                                                                  │
+│                                 ▼                                                                  │
+│                  ┌────────────────────────────┐                                                     │
+│                  │ 8. Filesystem Collections  │                                                     │
+│                  │ markdown + YAML config     │                                                     │
+│                  └────────────────────────────┘                                                     │
+│                                                                                                        │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+        </pre>
+
+        <table>
+          <thead>
+            <tr><th>Container</th><th>Tech</th><th>Responsibility</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>CLI</td><td>Bun / Node CLI</td><td>Human command surface for indexing, querying, status, embed, cleanup, collections, context</td></tr>
+            <tr><td>MCP server</td><td>MCP stdio + HTTP</td><td>Expose qmd tools/resources/prompts to agents</td></tr>
+            <tr><td>Daemon</td><td>Unix socket + background process</td><td>Keep models warm and reduce repeated cold-start cost</td></tr>
+            <tr><td>Store / retrieval core</td><td>TypeScript module layer</td><td>Own chunking, search, ranking, schema, cache, maintenance</td></tr>
+            <tr><td>LLM layer</td><td>node-llama-cpp</td><td>Provide embeddings, query expansion, reranking, model lifecycle management</td></tr>
+            <tr><td>SQLite store</td><td>SQLite + FTS5 + sqlite-vec</td><td>Persist documents, lexical index, vector index, cache, health info</td></tr>
+            <tr><td>Filesystem collections</td><td>Markdown + YAML</td><td>Source corpus and collection registry</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="level3">
+        <h2>C4 Level 3 — Components</h2>
+        <p class="description">
+          The critical internal flows. These are the components that decide whether qmd behaves like a toy retriever or a serious local search system.
+        </p>
+
+        <h3>3.1 Indexing / storage components</h3>
+        <pre>
+filesystem markdown
+      │
+      ▼
+collections.ts
+(load YAML config)
+      │
+      ▼
+store.ts
+  ├── hashContent()
+  ├── extractTitle()
+  ├── insertContent()
+  ├── insertDocument()
+  ├── chunkDocumentByTokens()
+  ├── insertEmbedding()
+  └── FTS triggers maintain documents_fts
+      │
+      ▼
+SQLite
+  - content
+  - documents
+  - documents_fts
+  - content_vectors
+  - vectors_vec
+  - llm_cache
+        </pre>
+
+        <h3>3.2 Hybrid query components</h3>
+        <pre>
+user query
+   │
+   ▼
+BM25 probe (searchFTS)
+   │
+   ├── strong signal? yes -> skip expansion
+   │
+   └── no -> expandQuery()
+              ├── lex variants
+              ├── vec variants
+              └── hyde variants
+                        │
+                        ▼
+                 type-routed retrieval
+              ├── lex  -> FTS
+              ├── vec  -> vector
+              └── hyde -> vector
+                        │
+                        ▼
+                reciprocalRankFusion()
+                        │
+                        ▼
+                 candidate documents
+                        │
+                        ▼
+             chunkDocument() each candidate
+                        │
+                        ▼
+             pick best chunk per document
+                        │
+                        ▼
+                    rerank()
+                        │
+                        ▼
+          position-aware blending: RRF × reranker
+                        │
+                        ▼
+                   final ranked results
+        </pre>
+
+        <h3>3.3 Agent / daemon components</h3>
+        <pre>
+CLI query / MCP tool call
+        │
+        ├── if daemon available -> sendCommand() over Unix socket
+        │                           │
+        │                           ▼
+        │                     daemon handles query
+        │                     warm models already loaded
+        │
+        └── else -> local execution path
+                     createStore()
+                     maybe load models
+                     run query flow
+        </pre>
+
+        <div class="grid">
+          <div class="card">
+            <h4>Strong-signal short-circuit</h4>
+            <p>If BM25 is already clearly right, qmd skips expensive expansion. This is one of the smartest product decisions in the repo.</p>
+          </div>
+          <div class="card">
+            <h4>Typed expansion</h4>
+            <p>Expansion outputs are not generic paraphrases. They are typed as <code>lex</code>, <code>vec</code>, or <code>hyde</code> and routed to the matching backend.</p>
+          </div>
+          <div class="card">
+            <h4>Chunk rerank, not document rerank</h4>
+            <p>qmd reranks best chunks per candidate document instead of entire bodies. That is a real performance and quality decision, not a cosmetic optimization.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="level4">
+        <h2>C4 Level 4 — Code / module structure</h2>
+        <p class="description">
+          The file-level architecture that actually shapes the system. The good and the dangerous parts are both visible here.
+        </p>
+
+        <pre>
+src/
+├── qmd.ts            # CLI entrypoint, command parsing, output formatting
+├── mcp.ts            # MCP server, tools, resources, prompts
+├── daemon.ts         # background warm-model server over Unix socket
+├── store.ts          # schema, path utils, chunking, FTS, vectors, ranking, maintenance
+├── llm.ts            # node-llama-cpp abstraction, embeddings, expansion, reranking
+├── db.ts             # Bun/Node SQLite compatibility layer + sqlite-vec loading
+├── collections.ts    # YAML config for collections and path contexts
+└── debug.ts          # tracing / debug utilities
+        </pre>
+
+        <table>
+          <thead>
+            <tr><th>Module</th><th>Architectural role</th><th>Judgment</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>src/qmd.ts</code></td><td>CLI control plane and output surface</td><td>Strong UX layer, but also carries more output logic than ideal</td></tr>
+            <tr><td><code>src/mcp.ts</code></td><td>Agent access surface</td><td>Well thought through, especially dynamic instructions and <code>qmd://</code> resource model</td></tr>
+            <tr><td><code>src/daemon.ts</code></td><td>Warm-model runtime</td><td>Good practical response to local model cold-start pain</td></tr>
+            <tr><td><code>src/store.ts</code></td><td>Retrieval core, schema, maintenance, chunking, search, ranking</td><td>The most important file and the biggest architectural smell. It does too much.</td></tr>
+            <tr><td><code>src/llm.ts</code></td><td>Local-model lifecycle and operations</td><td>Surprisingly mature; handles lazy loading, pooling, inactivity unload, and typed expansion</td></tr>
+            <tr><td><code>src/db.ts</code></td><td>Cross-runtime DB adapter</td><td>Clean and pragmatic. Good boundary between Bun and Node</td></tr>
+            <tr><td><code>src/collections.ts</code></td><td>Human-readable config model</td><td>Good move away from storing collections in SQLite</td></tr>
+          </tbody>
+        </table>
+
+        <div class="callout">
+          <strong>Main codebase risk:</strong> <code>store.ts</code> is both the heart of qmd and the place where future change will get painful first. The file is not bad. It is just too central.
+        </div>
+      </section>
+
+      <section id="content-model">
+        <h2>Core content model</h2>
+        <p class="description">
+          qmd stores the same corpus in two representations: document identity and chunk semantics.
+        </p>
+
+        <pre>
+filesystem file
+   │
+   ▼
+content-addressable storage
+   - content(hash, doc)
+   │
+   ▼
+document identity layer
+   - documents(collection, path, title, hash, active)
+   │
+   ├── full-document FTS representation
+   │     documents_fts(filepath, title, body)
+   │
+   └── chunk-level semantic representation
+         content_vectors(hash, seq, pos, model, embedded_at)
+         vectors_vec(hash_seq, embedding)
+        </pre>
+
+        <table>
+          <thead>
+            <tr><th>Model</th><th>Granularity</th><th>Why it matters</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>content</code></td><td>Whole document</td><td>Content-addressed storage is the canonical stored body</td></tr>
+            <tr><td><code>documents</code></td><td>Whole document</td><td>Maps collection/path/title to content hash and active state</td></tr>
+            <tr><td><code>documents_fts</code></td><td>Whole document</td><td>Lexical search runs over full document bodies, not chunks</td></tr>
+            <tr><td><code>content_vectors</code></td><td>Chunk</td><td>Tracks chunk sequence and char positions for semantic retrieval</td></tr>
+            <tr><td><code>vectors_vec</code></td><td>Chunk</td><td>Stores actual embedding vectors in sqlite-vec</td></tr>
+            <tr><td><code>llm_cache</code></td><td>Operation result</td><td>Caches expansion and rerank results to cut repeated cost</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="search-model">
+        <h2>Core search model</h2>
+        <p class="description">
+          qmd’s retrieval logic is not “BM25 plus vectors.” It is a staged decision process.
+        </p>
+
+        <pre>
+1. searchFTS() probes lexical strength
+2. if strong enough, skip expensive LLM expansion
+3. else expandQuery() emits typed variants:
+     - lex
+     - vec
+     - hyde
+4. backend routing:
+     - lex  -> searchFTS()
+     - vec  -> searchVec()
+     - hyde -> searchVec()
+5. reciprocalRankFusion() merges lists
+6. choose candidate documents
+7. re-chunk candidate bodies
+8. choose best chunk per document
+9. rerank best chunks
+10. blend reranker score with RRF position
+11. output snippets and paths
+        </pre>
+
+        <div class="grid">
+          <div class="card">
+            <h4>What qmd is optimizing</h4>
+            <p>Retrieval quality under local constraints: low latency, bounded model cost, high debuggability.</p>
+          </div>
+          <div class="card">
+            <h4>What qmd is not doing</h4>
+            <p>It is not maintaining compiled truth, entity pages, or living summaries. That is outside its architectural scope.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="config-model">
+        <h2>Collection and context model</h2>
+        <p class="description">
+          qmd moved collections and contexts out of SQLite and into YAML. That was a strong product decision.
+        </p>
+
+        <pre>
+~/.config/qmd/index.yml
+
+global_context: optional string
+collections:
+  journals:
+    path: /absolute/path/to/journals
+    pattern: "**/*.md"
+    update: optional shell command
+    context:
+      "/": "overall collection context"
+      "/2026": "subtree context"
+        </pre>
+
+        <p class="description">
+          Important nuance: qmd already has a concept called <strong>context</strong>, but it means collection/path descriptions supplied by the operator. It does not mean LLM-generated chunk context. That naming collision matters for any future contextual-retrieval design.
+        </p>
+      </section>
+
+      <section id="index-flow">
+        <h2>Runtime flow — Indexing</h2>
+        <p class="description">
+          The indexing pipeline turns markdown files into two searchable views: full-document lexical recall and chunk-level semantic recall.
+        </p>
+
+        <pre>
+collection path + glob
+      │
+      ▼
+filesystem scan
+      │
+      ▼
+read markdown file
+      │
+      ├── hashContent()
+      ├── extractTitle()
+      ├── insertContent()
+      └── insertDocument()
+                │
+                ├── FTS triggers keep documents_fts in sync
+                │
+                └── optional embed step later:
+                      chunkDocumentByTokens()
+                      -> embedBatch()
+                      -> insertEmbedding()
+                      -> vectors_vec rows
+        </pre>
+      </section>
+
+      <section id="query-flow">
+        <h2>Runtime flow — Hybrid query</h2>
+        <p class="description">
+          This is the main intellectual core of qmd today.
+        </p>
+
+        <pre>
+user query
+   │
+   ▼
+searchFTS(query, 20)
+   │
+   ├── if top BM25 result is strong and clearly ahead:
+   │      skip expansion
+   │
+   └── else:
+         expandQuery(query)
+            -> lex variants
+            -> vec variants
+            -> hyde variants
+                  │
+                  ▼
+            route each variant to matching backend
+                  │
+                  ▼
+             reciprocalRankFusion()
+                  │
+                  ▼
+              top candidate docs
+                  │
+                  ▼
+         chunk candidate bodies again
+                  │
+                  ▼
+         pick best chunk per document
+                  │
+                  ▼
+                rerank()
+                  │
+                  ▼
+     blend reranker score with RRF position score
+                  │
+                  ▼
+             final ranked results
+        </pre>
+
+        <div class="callout">
+          <strong>Why this is good:</strong> qmd is not paying LLM cost blindly. It is using lexical strength as a gate, typed expansion as routing intelligence, and reranking only after a cheap candidate-narrowing stage.
+        </div>
+      </section>
+
+      <section id="daemon-flow">
+        <h2>Runtime flow — Daemon / MCP</h2>
+        <p class="description">
+          The daemon and MCP layers are not decoration. They are what make qmd usable as infrastructure instead of just a command.
+        </p>
+
+        <pre>
+qmd daemon start
+     │
+     ▼
+background process
+  - open database
+  - preload / warm models
+  - listen on Unix socket
+     │
+     ├── qmd query/search/vsearch can auto-forward
+     └── qmd mcp --http --daemon can serve agent traffic
+
+MCP server
+  - exposes search tools
+  - exposes qmd:// resources
+  - generates dynamic instructions from real index state
+  - lets agents choose the right tool with less guesswork
+        </pre>
+      </section>
+
+      <section id="decisions">
+        <h2>Key architectural decisions</h2>
+        <table>
+          <thead>
+            <tr><th>Decision</th><th>Why it exists</th><th>Architectural effect</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Files remain source of truth</td><td>Keep the corpus human-readable and re-indexable</td><td>qmd stays a retrieval layer, not a content authority</td></tr>
+            <tr><td>Collections moved to YAML</td><td>SQLite was opaque for config</td><td>Collections and contexts are easier to inspect and version</td></tr>
+            <tr><td>Document-level FTS</td><td>Keep lexical retrieval simple and strong</td><td>BM25 works at file granularity, not chunk granularity</td></tr>
+            <tr><td>Chunk-level vectors</td><td>Semantic retrieval needs smaller units</td><td>Vectors are more precise but also structurally different from BM25</td></tr>
+            <tr><td>Strong-signal BM25 short-circuit</td><td>Don’t pay LLM cost when lexical is already obviously right</td><td>Keeps the system practical and fast</td></tr>
+            <tr><td>Typed query expansion</td><td>Different backends need different query forms</td><td>Reduces wasted retrieval calls</td></tr>
+            <tr><td>Chunk rerank only</td><td>Full-document reranking is too expensive</td><td>Preserves quality without blowing token/latency budgets</td></tr>
+            <tr><td>Daemonized warm models</td><td>Local models are expensive to cold-start repeatedly</td><td>Makes qmd viable as a repeated interactive / agent tool</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="contextual-retrieval">
+        <h2>Contextual retrieval — where it fits and where it doesn’t</h2>
+        <p class="description">
+          This is the architectural question that matters most if qmd evolves.
+        </p>
+
+        <div class="grid">
+          <div class="card">
+            <h4>Easy fit: contextual embeddings</h4>
+            <p>Chunk-level vectors already exist. The cleanest low-risk experiment is to contextualize chunk text before embedding while preserving raw chunk text for display/debugging.</p>
+          </div>
+          <div class="card">
+            <h4>Hard fit: contextual BM25</h4>
+            <p>BM25 currently indexes full documents, not chunks. Real contextual BM25 would likely require chunk-level lexical indexing, not just a tiny patch.</p>
+          </div>
+          <div class="card">
+            <h4>Architectural implication</h4>
+            <p>The codebase supports a phased approach: contextual embeddings first, chunk-level BM25 only if the quality gain justifies a larger schema and retrieval change.</p>
+          </div>
+        </div>
+
+        <pre>
+Current qmd
+  BM25  -> full documents
+  Vec   -> chunks
+
+Contextual retrieval dream
+  BM25  -> chunks with context
+  Vec   -> chunks with context
+
+Reality
+  Vector-side contextualization: small / feasible
+  BM25-side contextualization: bigger architectural change
+        </pre>
+
+        <div class="callout">
+          <strong>Bottom line:</strong> qmd is more mature than a blank-slate PRD would assume. That means new retrieval ideas need to fit the actual document/chunk split instead of pretending the system is chunk-native everywhere.
+        </div>
+      </section>
+
+      <footer>
+        Self-contained architecture artifact for <code>qmd</code>. Built in the same long-form style as prior architecture HTMLs: context, containers, components, code, models, and runtime flows in one file. Later, this whole open-source codebase analysis workflow can be packaged as a reusable skill.
+      </footer>
+    </main>
+  </div>
+</body>
+</html>

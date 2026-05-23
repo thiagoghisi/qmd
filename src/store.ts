@@ -3275,6 +3275,22 @@ function sanitizeHyphenatedTerm(term: string): string {
  *   DEC-0054               → "dec 0054"
  *   -multi-agent            → NOT "multi agent"
  */
+// Common English stop words that match nearly every document and add noise to OR queries.
+// Filtered out of plain-term branch in buildFTS5Query before joining with OR.
+const FTS5_STOP_WORDS = new Set([
+  'a','an','the','and','or','but','in','on','at','to','for','of','with','by',
+  'from','is','it','its','was','were','be','been','being','have','has','had',
+  'do','does','did','will','would','shall','should','may','might','must','can',
+  'could','i','me','my','mine','we','us','our','ours','you','your','yours',
+  'he','him','his','she','her','hers','they','them','their','theirs',
+  'this','that','these','those','what','which','who','whom','whose',
+  'where','when','how','why','not','no','nor','so','if','then','than',
+  'too','very','just','about','above','after','again','all','also','am','any',
+  'are','as','because','before','between','both','each','few','get','got',
+  'here','into','more','most','now','only','other','out','over','own',
+  'same','some','such','there','through','under','until','up','while',
+]);
+
 function buildFTS5Query(query: string): string | null {
   const positive: string[] = [];
   const negative: string[] = [];
@@ -3340,6 +3356,11 @@ function buildFTS5Query(query: string): string | null {
       } else {
         const sanitized = sanitizeFTS5Term(term);
         if (sanitized) {
+          // Filter stop words from positive terms (still allow them in negatives — explicit user intent)
+          if (!negated && FTS5_STOP_WORDS.has(sanitized)) {
+            // Skip — stop words match nearly every doc and add noise to OR queries
+            continue;
+          }
           const ftsTerm = `"${sanitized}"*`;  // Prefix match
           if (negated) {
             negative.push(ftsTerm);
@@ -3356,8 +3377,11 @@ function buildFTS5Query(query: string): string | null {
   // If only negative terms, we can't search (FTS5 NOT is binary)
   if (positive.length === 0) return null;
 
-  // Join positive terms with AND
-  let result = positive.join(' AND ');
+  // Join positive terms with OR (more lenient — BM25 scoring naturally promotes
+  // docs that match more terms, so OR preserves recall on multi-word natural-language
+  // queries like "Franklin Covey seven habits leadership" without losing relevance.
+  // Quoted phrases and hyphenated tokens still match as exact-phrase units.)
+  let result = positive.join(' OR ');
 
   // Add NOT clause for negative terms
   for (const neg of negative) {

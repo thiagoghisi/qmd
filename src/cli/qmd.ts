@@ -2171,7 +2171,18 @@ export function termLink(text: string, url: string, isTTY: boolean = !!process.s
 function outputDaemonResults(data: { results: any[]; query: string }, opts: OutputOptions): void {
   const { results, query } = data;
   if (!results || results.length === 0) {
-    console.log("No results found.");
+    // Match outputResults' format-aware empty handling — callers that pass --json
+    // must always get valid JSON (empty array), not human text. Otherwise downstream
+    // jq/python parsers fail and break test/regression scripts.
+    if (opts.format === "json") {
+      console.log("[]");
+    } else if (opts.format === "xml") {
+      console.log("<results></results>");
+    } else if (opts.format === "md" || opts.format === "files") {
+      // no output
+    } else {
+      console.log("No results found.");
+    }
     return;
   }
 

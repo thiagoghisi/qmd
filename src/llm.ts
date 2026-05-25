@@ -1506,13 +1506,17 @@ export class LlamaCpp implements LLM {
       // DO NOT use greedy decoding (temp=0) - causes infinite loops
       const result = await session.prompt(prompt, {
         grammar,
-        maxTokens: 600,
+        // 350 tokens ≈ 10 lines × ~30 tokens each. Was 600 which let the LLM enter
+        // repetition loops generating 20-30 near-identical hyde expansions for queries
+        // it misinterprets (e.g. "shame shutdown vulnerability" → CVE-style templates).
+        maxTokens: 350,
         temperature: 0.7,
         topK: 20,
         topP: 0.8,
         repeatPenalty: {
-          lastTokens: 64,
-          presencePenalty: 0.5,
+          // Stronger penalty on a wider window to break the templated-expansion loops.
+          lastTokens: 128,
+          presencePenalty: 1.0,
         },
       });
 
@@ -1536,8 +1540,22 @@ export class LlamaCpp implements LLM {
         return { type: type as QueryType, text };
       }).filter((q): q is Queryable => q !== null);
 
-      // Filter out lex entries if not requested
-      const filtered = includeLexical ? queryables : queryables.filter(q => q.type !== 'lex');
+      // Filter out lex entries if not requested, deduplicate near-identical expansions,
+      // then cap at MAX_EXPANSIONS. The LLM sometimes enters repetition loops generating
+      // 20+ copies of the same templated text — dedup catches these while preserving
+      // diverse expansions. Cap prevents the daemon socket timeout (180s) from killing
+      // searches that get too many candidate queries.
+      const MAX_EXPANSIONS = 10;
+      const withLex = includeLexical ? queryables : queryables.filter(q => q.type !== 'lex');
+      const seen = new Set<string>();
+      const deduped = withLex.filter(q => {
+        // Normalize: lowercase, collapse whitespace, first 80 chars for fuzzy match
+        const key = q.text.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 80);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      const filtered = deduped.slice(0, MAX_EXPANSIONS);
       if (filtered.length > 0) {
         debug("llm.expand", `done in ${Date.now() - t0}ms`, { results: filtered.length, types: filtered.map(q => q.type) });
         return filtered;

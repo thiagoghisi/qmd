@@ -12,6 +12,7 @@ import { tmpdir } from "os";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { spawn } from "child_process";
+import { createServer } from "net";
 import { setTimeout as sleep } from "timers/promises";
 import { buildEditorUri, termLink, resolveEmbedModelForCli } from "../src/cli/qmd.ts";
 import { openDatabase } from "../src/db.ts";
@@ -1111,6 +1112,89 @@ describe("CLI Search with Collection Filter", () => {
     expect(exitCode).toBe(0);
     expect(stdout).toContain("qmd://memory-root/root.md");
     expect(stdout).toContain("qmd://memory-dir/dir.md");
+  });
+
+  test("resolves fuzzy collection names before sending query to daemon", async () => {
+    const careerRoot = await mkdtemp(join(tmpdir(), "qmd-daemon-career-"));
+    const fakeHome = await mkdtemp(join(tmpdir(), "qmd-fake-home-"));
+    await writeFile(join(careerRoot, "career.md"), "# Career\ncareer-daemon-token\n");
+    await runQmd(["collection", "add", careerRoot, "--name", "career-development"], {
+      dbPath: localDbPath,
+    });
+
+    const runtimeDir = join(fakeHome, ".cache", "qmd");
+    const socketPath = join(runtimeDir, "daemon.sock");
+    const pidPath = join(runtimeDir, "daemon.pid");
+    await mkdir(runtimeDir, { recursive: true });
+    try { unlinkSync(socketPath); } catch { /* absent */ }
+    writeFileSync(pidPath, String(process.pid));
+
+    let received: { command?: string; args?: Record<string, unknown> } | undefined;
+    const server = createServer((socket) => {
+      let buffer = "";
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString();
+        const newline = buffer.indexOf("\n");
+        if (newline === -1) return;
+        const line = buffer.slice(0, newline);
+        received = JSON.parse(line);
+        socket.write(JSON.stringify({
+          ok: true,
+          data: {
+            query: received?.args?.query,
+            results: [
+              {
+                docid: "#career1",
+                file: "qmd://career-development/career.md",
+                title: "Career",
+                score: 0.99,
+                snippet: "career daemon result",
+                line: 1,
+              },
+            ],
+          },
+        }) + "\n");
+        socket.end();
+      });
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+
+    try {
+      const { stdout, stderr, exitCode } = await runQmd([
+        "query",
+        "-c",
+        "career",
+        "--json",
+        "-n",
+        "5",
+        "career-daemon-token",
+      ], {
+        dbPath: localDbPath,
+        env: { HOME: fakeHome },
+      });
+
+      if (exitCode !== 0) {
+        console.log("Daemon fuzzy collection test failed:");
+        console.log("stdout:", stdout);
+        console.log("stderr:", stderr);
+      }
+      expect(exitCode).toBe(0);
+      expect(received?.command).toBe("query");
+      expect(received?.args?.collection).toEqual(["career-development"]);
+      const parsed = JSON.parse(stdout);
+      expect(parsed[0].file).toBe("qmd://career-development/career.md");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      try { unlinkSync(socketPath); } catch { /* already gone */ }
+      try { unlinkSync(pidPath); } catch { /* already gone */ }
+    }
   });
 });
 

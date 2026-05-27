@@ -1472,8 +1472,14 @@ export class LlamaCpp implements LLM {
     const t0 = Date.now();
     debug("llm.expand", "call", { query: query.slice(0, 100), model: "generate" });
 
-    const llama = await this.ensureLlama();
+    // Order matters: ensureGenerateModel may internally trigger a fresh llama
+    // load if disposal happened between calls. Capturing `llama` BEFORE that
+    // could leave us with a stale instance, producing the LlamaGrammar
+    // cross-instance error ("created with a different Llama instance than the
+    // one used by this sequence's model"). Get llama AFTER the model is
+    // resolved so both come from the same llama.
     await this.ensureGenerateModel();
+    const llama = await this.ensureLlama();
 
     const includeLexical = options.includeLexical ?? true;
     const context = options.context;

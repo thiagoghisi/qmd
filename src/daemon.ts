@@ -23,6 +23,7 @@ import { debug } from "./debug.js";
 import { createServer, connect, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { RankedResult } from "./store.js";
 
 // =============================================================================
 // Paths and constants
@@ -33,6 +34,11 @@ const SOCKET_PATH = join(RUNTIME_DIR, "daemon.sock");
 const PID_FILE = join(RUNTIME_DIR, "daemon.pid");
 
 export { SOCKET_PATH, PID_FILE, RUNTIME_DIR };
+
+type DaemonRankedResult = RankedResult & {
+  hash?: string;
+  docid?: string;
+};
 
 // =============================================================================
 // Daemon client (used by CLI to check/connect to daemon)
@@ -180,6 +186,14 @@ export async function startDaemonServer(): Promise<void> {
     return [raw as string];
   }
 
+  function collectionScopes(collection: string[]): (string | undefined)[] {
+    return collection.length > 0 ? collection : [undefined];
+  }
+
+  function byScoreDesc<T extends { score: number }>(results: T[]): T[] {
+    return results.sort((a, b) => b.score - a.score);
+  }
+
   console.error(`[qmd daemon] PID ${process.pid}, socket ${SOCKET_PATH}`);
   console.error(`[qmd daemon] Database opened, ${store.getStatus().totalDocuments} documents indexed`);
 
@@ -293,9 +307,11 @@ export async function startDaemonServer(): Promise<void> {
         const collection = normalizeCollection(args.collection);
         const minScore = (args.minScore as number) || 0;
 
-        const results = store.searchFTS(query, limit)
-          .filter((r: any) => collection.length === 0 || collection.includes(r.collectionName))
+        const results = byScoreDesc(collectionScopes(collection).flatMap((scope) =>
+          store.searchFTS(query, limit, scope)
+        ))
           .filter((r: any) => r.score >= minScore)
+          .slice(0, limit)
           .map((r: any) => {
             const { line, snippet } = extractSnippet(r.body || "", query, 300, r.chunkPos);
             return {
@@ -341,18 +357,17 @@ export async function startDaemonServer(): Promise<void> {
           sendStderr(`Expanded to ${queries.length} queries, searching vectors...\n`);
 
           // Collect results
-          // Pass single collection name to searchVec for wider k when filtering
-          const singleCollection = collection.length === 1 ? collection[0] : undefined;
           const allResults = new Map<string, any>();
           for (const q of queries) {
             // ExpandedQuery is now { type, query } — pass the string + singleCollection for wider k
             const queryText = typeof q === 'string' ? q : q.query;
-            const vecResults = await store.searchVec(queryText, DEFAULT_EMBED_MODEL, limit, singleCollection);
-            for (const r of vecResults) {
-              if (collection.length > 1 && !collection.includes(r.collectionName)) continue;
-              const existing = allResults.get(r.filepath);
-              if (!existing || r.score > existing.score) {
-                allResults.set(r.filepath, r);
+            for (const scope of collectionScopes(collection)) {
+              const vecResults = await store.searchVec(queryText, DEFAULT_EMBED_MODEL, limit, scope);
+              for (const r of vecResults) {
+                const existing = allResults.get(r.filepath);
+                if (!existing || r.score > existing.score) {
+                  allResults.set(r.filepath, r);
+                }
               }
             }
           }
@@ -409,10 +424,13 @@ export async function startDaemonServer(): Promise<void> {
 
         try {
           // Replicate the querySearch pipeline from qmd.ts
-          // Pass single collection to searchFTS for SQL-level filtering (100K → 725 docs)
-          const singleCollectionFts = collection.length === 1 ? collection[0] : undefined;
-          const initialFts = store.searchFTS(query, 20, singleCollectionFts)
-            .filter((r: any) => collection.length === 0 || collection.includes(r.collectionName));
+          // Search each resolved collection directly. Prefix filters such as
+          // "-c memory" expand to multiple small collections; global top-K
+          // followed by post-filtering loses recall in that case.
+          const scopes = collectionScopes(collection);
+          const initialFts = byScoreDesc(scopes.flatMap((scope) =>
+            store.searchFTS(query, 20, scope)
+          ));
 
           const hasVectors = !!store.db.prepare(
             `SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`
@@ -446,31 +464,34 @@ export async function startDaemonServer(): Promise<void> {
 
             sendStderr(`Searching ${ftsQueries.length} lexical + ${vectorQueries.length} vector queries...\n`);
 
-            const rankedLists: any[][] = [];
+            const rankedLists: DaemonRankedResult[][] = [];
             const hashMap = new Map<string, string>();
             const searchPromises: Promise<void>[] = [];
 
             for (const q of ftsQueries) {
-              const ftsResults = store.searchFTS(q, 20, singleCollectionFts)
-                .filter((r: any) => collection.length === 0 || collection.includes(r.collectionName));
+              const ftsResults = byScoreDesc(scopes.flatMap((scope) =>
+                store.searchFTS(q, 20, scope)
+              ));
               if (ftsResults.length > 0) {
                 rankedLists.push(ftsResults.map((r: any) => {
                   hashMap.set(r.filepath, r.hash);
-                  return { filepath: r.filepath, displayPath: r.displayPath, title: r.title, score: r.score, hash: r.hash, docid: r.docid, body: r.body };
+                  return { file: r.filepath, displayPath: r.displayPath, title: r.title, score: r.score, hash: r.hash, docid: r.docid, body: r.body };
                 }));
               }
             }
 
             if (hasVectors) {
-              const querySingleCollection = collection.length === 1 ? collection[0] : undefined;
               for (const q of vectorQueries) {
                 searchPromises.push((async () => {
-                  const vecResults = await store.searchVec(q, DEFAULT_EMBED_MODEL, 20, querySingleCollection)
-                    .then((r: any[]) => r.filter((r: any) => collection.length <= 1 || collection.includes(r.collectionName)));
+                  const vecResults: any[] = [];
+                  for (const scope of scopes) {
+                    vecResults.push(...await store.searchVec(q, DEFAULT_EMBED_MODEL, 20, scope));
+                  }
+                  byScoreDesc(vecResults);
                   if (vecResults.length > 0) {
                     rankedLists.push(vecResults.map((r: any) => {
                       hashMap.set(r.filepath, r.hash);
-                      return { filepath: r.filepath, displayPath: r.displayPath, title: r.title, score: r.score, hash: r.hash, docid: r.docid, body: r.body };
+                      return { file: r.filepath, displayPath: r.displayPath, title: r.title, score: r.score, hash: r.hash, docid: r.docid, body: r.body };
                     }));
                   }
                 })());
@@ -482,15 +503,15 @@ export async function startDaemonServer(): Promise<void> {
 
             debug("daemon.query", "ranked lists", { lists: rankedLists.length, sizes: rankedLists.map(l => l.length) });
             const weights = rankedLists.map(() => 1.0);
-            const fused = reciprocalRankFusion(rankedLists, weights);
+            const fused = reciprocalRankFusion(rankedLists, weights) as DaemonRankedResult[];
             const RERANK_DOC_LIMIT = 40;
             const candidates = fused.slice(0, RERANK_DOC_LIMIT);
             debug("daemon.query", "RRF fusion", { fused: fused.length, candidates: candidates.length });
 
             // Prepare chunks for reranking
-            const chunksToRerank = candidates.map((c: any) => {
+            const chunksToRerank = candidates.map((c: DaemonRankedResult) => {
               const body = c.body || "";
-              return { file: c.filepath, text: body.slice(0, 3000), displayPath: c.displayPath, title: c.title, score: c.score, docid: c.docid };
+              return { file: c.file, text: body.slice(0, 3000), displayPath: c.displayPath, title: c.title, score: c.score, docid: c.docid };
             });
 
             debug("daemon.query", "reranking", { chunks: chunksToRerank.length });
@@ -509,7 +530,7 @@ export async function startDaemonServer(): Promise<void> {
               .map((r: any) => {
                 const candidate = chunksToRerank.find((c: any) => c.file === r.file);
                 if (!candidate) return null;
-                const rrfIdx = candidates.findIndex((c: any) => c.filepath === r.file);
+                const rrfIdx = candidates.findIndex((c: any) => c.file === r.file);
                 const rrfScore = rrfIdx >= 0 ? candidates[rrfIdx]!.score : 0;
 
                 let rrfWeight: number;

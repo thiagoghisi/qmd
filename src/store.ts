@@ -3520,13 +3520,22 @@ export async function searchVec(db: Database, query: string, model: string, limi
   // needs a wider net to find matches within that collection.
   // Keep multiplier modest to avoid GPU OOM on Metal (Mac Mini 8GB).
   const kMultiplier = collectionName ? 8 : 3;
+  const scanStart = Date.now();
   const vecResults = db.prepare(`
     SELECT hash_seq, distance
     FROM vectors_vec
     WHERE embedding MATCH ? AND k = ?
   `).all(new Float32Array(embedding), limit * kMultiplier) as { hash_seq: string; distance: number }[];
+  const scanMs = Date.now() - scanStart;
 
-  debug("vec", `sqlite-vec returned ${vecResults.length} matches`, vecResults.length > 0 ? { bestDist: vecResults[0]!.distance, worstDist: vecResults[vecResults.length - 1]!.distance } : undefined);
+  debug("vec", `sqlite-vec returned ${vecResults.length} matches`, {
+    scanMs,
+    k: limit * kMultiplier,
+    kMultiplier,
+    ...(vecResults.length > 0
+      ? { bestDist: vecResults[0]!.distance, worstDist: vecResults[vecResults.length - 1]!.distance }
+      : {}),
+  });
   if (vecResults.length === 0) return [];
 
   // Step 2: Get chunk info and document data
@@ -3560,6 +3569,15 @@ export async function searchVec(db: Database, query: string, model: string, limi
     hash_seq: string; hash: string; pos: number; filepath: string;
     display_path: string; title: string; body: string;
   }[]);
+
+  if (collectionName) {
+    debug("vec", "collection-filter", {
+      collection: collectionName,
+      vec_candidates: vecResults.length,
+      after_filter: docRows.length,
+      dropped: vecResults.length - docRows.length,
+    });
+  }
 
   // Combine with distances and dedupe by filepath
   const seen = new Map<string, { row: typeof docRows[0]; bestDist: number }>();

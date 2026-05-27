@@ -299,7 +299,14 @@ export async function startDaemonServer(): Promise<void> {
           sendStderr(`Expanding query...\n`);
           const expandStart = Date.now();
           const queries = await store.expandQuery(query, DEFAULT_QUERY_MODEL);
-          debug("daemon.vsearch", `expanded in ${Date.now() - expandStart}ms`, { count: queries.length, types: queries.map(q => q.type) });
+          const vsExpandMs = Date.now() - expandStart;
+          // Heuristic: <50ms == llm_cache hit (SQL lookup), >50ms == live LLM call.
+          // Live expansion typically takes 500ms-12s depending on novelty.
+          debug("daemon.vsearch", `expanded in ${vsExpandMs}ms`, {
+            count: queries.length,
+            types: queries.map(q => q.type),
+            cached: vsExpandMs < 50,
+          });
           sendStderr(`Expanded to ${queries.length} queries, searching vectors...\n`);
 
           // Collect results
@@ -319,7 +326,13 @@ export async function startDaemonServer(): Promise<void> {
             }
           }
 
-          debug("daemon.vsearch", `found ${allResults.size} unique results`);
+          // vsearch path returns vec-ranked results directly (no rerank step).
+          // Use `qmd query` for the hybrid path which DOES rerank (see daemon.query).
+          debug("daemon.vsearch", `found ${allResults.size} unique results`, {
+            sub_searches: queries.length,
+            unique_results: allResults.size,
+            rerank: "skipped",
+          });
           sendStderr(`Found ${allResults.size} unique results\n`);
 
           const results = Array.from(allResults.values())
@@ -388,7 +401,12 @@ export async function startDaemonServer(): Promise<void> {
             if (!hasStrongSignal) {
               const expandStart = Date.now();
               const queryables = await session.expandQuery(query);
-              debug("daemon.query", `expanded in ${Date.now() - expandStart}ms`, { count: queryables.length, types: queryables.map(q => q.type) });
+              const qExpandMs = Date.now() - expandStart;
+              debug("daemon.query", `expanded in ${qExpandMs}ms`, {
+                count: queryables.length,
+                types: queryables.map(q => q.type),
+                cached: qExpandMs < 50,
+              });
               for (const q of queryables) {
                 if (q.type === 'lex' && q.text && q.text !== query) ftsQueries.push(q.text);
                 else if ((q.type === 'vec' || q.type === 'hyde') && q.text && q.text !== query) vectorQueries.push(q.text);

@@ -1050,6 +1050,68 @@ describe("CLI Search with Collection Filter", () => {
     }
     expect(exitCode).toBe(0);
   });
+
+  test("expands collection prefixes to all matching collections", async () => {
+    const prefixRoot = await mkdtemp(join(tmpdir(), "qmd-prefix-memory-"));
+    const rootDir = join(prefixRoot, "root");
+    const dirDir = join(prefixRoot, "dir");
+    const altDir = join(prefixRoot, "alt");
+    await mkdir(rootDir, { recursive: true });
+    await mkdir(dirDir, { recursive: true });
+    await mkdir(altDir, { recursive: true });
+    await writeFile(join(rootDir, "root.md"), "# Root\nprefix-shared-token root\n");
+    await writeFile(join(dirDir, "dir.md"), "# Dir\nprefix-shared-token dir\n");
+    await writeFile(join(altDir, "alt.md"), "# Alt\nprefix-shared-token alt\n");
+    await runQmd(["collection", "add", rootDir, "--name", "memory-root"], { dbPath: localDbPath });
+    await runQmd(["collection", "add", dirDir, "--name", "memory-dir"], { dbPath: localDbPath });
+    await runQmd(["collection", "add", altDir, "--name", "memory-alt"], { dbPath: localDbPath });
+
+    const { stdout, stderr, exitCode } = await runQmd([
+      "search",
+      "-c",
+      "memory",
+      "--files",
+      "-n",
+      "20",
+      "prefix-shared-token",
+    ], { dbPath: localDbPath });
+
+    if (exitCode !== 0) {
+      console.log("Prefix collection search failed:");
+      console.log("stdout:", stdout);
+      console.log("stderr:", stderr);
+    }
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("qmd://memory-root/root.md");
+    expect(stdout).toContain("qmd://memory-dir/dir.md");
+    expect(stdout).toContain("qmd://memory-alt/alt.md");
+  });
+
+  test("expands --container prefixes the same way as --collection", async () => {
+    const prefixRoot = await mkdtemp(join(tmpdir(), "qmd-container-prefix-memory-"));
+    const rootDir = join(prefixRoot, "root");
+    const dirDir = join(prefixRoot, "dir");
+    await mkdir(rootDir, { recursive: true });
+    await mkdir(dirDir, { recursive: true });
+    await writeFile(join(rootDir, "root.md"), "# Root\ncontainer-prefix-token root\n");
+    await writeFile(join(dirDir, "dir.md"), "# Dir\ncontainer-prefix-token dir\n");
+    await runQmd(["collection", "add", rootDir, "--name", "memory-root"], { dbPath: localDbPath });
+    await runQmd(["collection", "add", dirDir, "--name", "memory-dir"], { dbPath: localDbPath });
+
+    const { stdout, exitCode } = await runQmd([
+      "search",
+      "--container",
+      "memory",
+      "--files",
+      "-n",
+      "20",
+      "container-prefix-token",
+    ], { dbPath: localDbPath });
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("qmd://memory-root/root.md");
+    expect(stdout).toContain("qmd://memory-dir/dir.md");
+  });
 });
 
 describe("CLI Context Management", () => {

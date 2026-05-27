@@ -2380,8 +2380,32 @@ function outputResults(results: OutputRow[], query: string, opts: OutputOptions)
   }
 }
 
+function normalizeCollectionLookup(value: string): string {
+  return value.trim().replace(/^_+/, "").replace(/_/g, "-").toLowerCase();
+}
+
+function collectionMatchesLookup(
+  collection: { name: string; path: string },
+  normalizedLookup: string,
+): boolean {
+  const collectionName = collection.name.toLowerCase();
+  if (collectionName.startsWith(normalizedLookup)) {
+    return true;
+  }
+  const pathBase = collection.path
+    .split("/")
+    .pop()
+    ?.replace(/^_+/, "")
+    .replace(/_/g, "-")
+    .toLowerCase() || "";
+  return pathBase.startsWith(normalizedLookup);
+}
+
 // Resolve -c collection filter: supports single string, array, or undefined.
-// Returns validated collection names (exits on unknown collection).
+// Returns validated collection names (exits on unknown collection). Collection
+// filters are prefix-friendly for agent/human ergonomics: "memory" resolves to
+// all memory-prefixed collections, while exact full names naturally resolve to
+// themselves unless other collections share that full prefix.
 function resolveCollectionFilter(raw: string | string[] | undefined, useDefaults: boolean = false): string[] {
   // If no filter specified and useDefaults is true, use default collections
   if (!raw && useDefaults) {
@@ -2390,30 +2414,31 @@ function resolveCollectionFilter(raw: string | string[] | undefined, useDefaults
   if (!raw) return [];
   const names = Array.isArray(raw) ? raw : [raw];
   const validated: string[] = [];
-  for (const name of names) {
-    const coll = getCollectionFromYaml(name);
-    if (coll) {
+  const seen = new Set<string>();
+  const pushUnique = (name: string): void => {
+    if (!seen.has(name)) {
+      seen.add(name);
       validated.push(name);
-      continue;
     }
+  };
+  for (const name of names) {
     // Fuzzy matching for LLM agents that pass old names, partial names, or filesystem paths:
     //   "career" → "career-development" (prefix match on collection name)
     //   "_kindle_second-brain" → "kindle-highlights" (filesystem path match)
     //   "therapy" → "therapy-notes" (prefix match)
+    //   "memory" → "memory-root", "memory-dir", ... (all prefix matches)
     const allCollections = yamlListCollections();
-    const normalized = name.replace(/^_+/, "").replace(/_/g, "-").toLowerCase();
-    const match = allCollections.find(c => {
-      if (c.name === normalized) return true;
-      if (c.name.startsWith(normalized + "-") || c.name.startsWith(normalized)) return true;
-      const pathBase = c.path.split("/").pop()?.replace(/^_+/, "").replace(/_/g, "-").toLowerCase() || "";
-      return pathBase === normalized || pathBase.startsWith(normalized);
-    });
-    if (match) {
-      validated.push(match.name);
-    } else {
+    const normalized = normalizeCollectionLookup(name);
+    const matches = normalized
+      ? allCollections.filter((collection) => collectionMatchesLookup(collection, normalized))
+      : [];
+    if (matches.length === 0) {
       console.error(`Collection not found: ${name}`);
       closeDb();
       process.exit(1);
+    }
+    for (const match of matches) {
+      pushUnique(match.name);
     }
   }
   return validated;
@@ -4390,10 +4415,16 @@ if (isMain) {
       }
       // Try daemon first for warm models
       if (isDaemonRunning()) {
+        // Resolve fuzzy collection names (e.g., "career" → "career-development")
+        // before sending to daemon. The daemon uses the literal collection name
+        // for its FTS query and vec collection-filter, so we must canonicalize
+        // here — otherwise "career" matches no documents and the query returns
+        // empty even though career-development has plenty.
+        const resolvedCollection = resolveCollectionFilter(cli.opts.collection, false);
         const resp = await sendCommand("vsearch", {
           query: cli.query,
           limit: cli.opts.limit,
-          collection: cli.opts.collection,
+          collection: resolvedCollection.length > 0 ? resolvedCollection : cli.opts.collection,
           minScore: cli.opts.minScore,
         });
         if (resp.ok && resp.data) {
@@ -4414,10 +4445,13 @@ if (isMain) {
       }
       // Try daemon first for warm models
       if (isDaemonRunning()) {
+        // Resolve fuzzy collection names before sending to daemon — see vsearch
+        // case above for the full rationale.
+        const resolvedCollection = resolveCollectionFilter(cli.opts.collection, false);
         const resp = await sendCommand("query", {
           query: cli.query,
           limit: cli.opts.limit,
-          collection: cli.opts.collection,
+          collection: resolvedCollection.length > 0 ? resolvedCollection : cli.opts.collection,
           minScore: cli.opts.minScore,
         });
         if (resp.ok && resp.data) {

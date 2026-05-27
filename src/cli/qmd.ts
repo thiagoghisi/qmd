@@ -1929,6 +1929,10 @@ async function vectorIndex(
     maxDocsPerBatch: batchOptions?.maxDocsPerBatch,
     maxBatchBytes: batchOptions?.maxBatchBytes,
     chunkStrategy: batchOptions?.chunkStrategy,
+    // CLI re-embed paths can run for hours on large corpora. The library
+    // default (30m) catches runaway interactive sessions; this override
+    // applies only to user-initiated `qmd embed` batch jobs.
+    maxDurationMs: 24 * 60 * 60 * 1000,
     onProgress: (info) => {
       if (info.totalBytes === 0) return;
       // Progress is measured by input bytes, not by chunks. The final chunk

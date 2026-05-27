@@ -1411,6 +1411,13 @@ export type EmbedOptions = {
   maxBatchBytes?: number;
   chunkStrategy?: ChunkStrategy;
   onProgress?: (info: EmbedProgress) => void;
+  /**
+   * Maximum wall-clock time (ms) for the embedding session before it is
+   * aborted as runaway. Defaults to 30 minutes — sized to catch interactive
+   * sessions, not bound legitimate batch re-embeds. Long-running operations
+   * (large `embed --force` runs) should override explicitly.
+   */
+  maxDurationMs?: number;
 };
 
 type PendingEmbeddingDoc = {
@@ -1825,7 +1832,7 @@ export async function generateEmbeddings(
     }
 
     return { chunksEmbedded, errors: activeErrorCount(), failures: failureList() };
-  }, { maxDuration: 24 * 60 * 60 * 1000, name: 'generateEmbeddings' });
+  }, { maxDuration: options?.maxDurationMs ?? 30 * 60 * 1000, name: 'generateEmbeddings' });
 
   return {
     docsProcessed: totalDocs,

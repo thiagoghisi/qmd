@@ -222,12 +222,16 @@ export async function startDaemonServer(): Promise<void> {
         const start = Date.now();
         const loaded: string[] = [];
         const failed: string[] = [];
+        let warmupEmbedding: number[] | null = null;
 
         await withLLMSession(async (session) => {
           // Load embed + generate in parallel
           const results = await Promise.allSettled([
             session.expandQuery("test warmup query").then(() => { loaded.push("generate"); }),
-            session.embed("test warmup text").then(() => { loaded.push("embed"); }),
+            session.embed("test warmup text").then((r) => {
+              loaded.push("embed");
+              warmupEmbedding = r?.embedding ?? null;
+            }),
           ]);
           for (const r of results) {
             if (r.status === "rejected") {
@@ -247,11 +251,38 @@ export async function startDaemonServer(): Promise<void> {
           }
         });
 
+        // Page-cache prime for the sqlite-vec index.
+        // Without this, the first real vsearch of the day pays a one-time
+        // cold-I/O penalty (~17s on a 4.2 GB / 540K-vector index) as the OS
+        // pulls index pages off disk. Running one tiny MATCH query here forces
+        // those pages into the OS page cache so subsequent user queries serve
+        // from RAM (sub-second per scan).
+        if (warmupEmbedding) {
+          try {
+            const vecStart = Date.now();
+            const tableExists = store.db.prepare(
+              `SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`
+            ).get();
+            if (tableExists) {
+              store.db.prepare(
+                `SELECT hash_seq FROM vectors_vec WHERE embedding MATCH ? AND k = 1`
+              ).all(new Float32Array(warmupEmbedding));
+              const vecMs = Date.now() - vecStart;
+              sendStderr(`[qmd daemon] vec-index primed in ${(vecMs / 1000).toFixed(1)}s\n`);
+              debug("daemon.warmup", "vec-index primed", { scanMs: vecMs });
+              loaded.push("vec-index");
+            }
+          } catch (e) {
+            failed.push("vec-index");
+            sendStderr(`[qmd daemon] Warning: vec-index prime failed: ${e}\n`);
+          }
+        }
+
         const elapsed = ((Date.now() - start) / 1000).toFixed(1);
         if (failed.length > 0) {
           sendStderr(`[qmd daemon] Warmup partial: ${loaded.join(", ")} loaded; ${failed.join(", ")} failed (${elapsed}s)\n`);
         } else {
-          sendStderr(`[qmd daemon] All models warm in ${elapsed}s\n`);
+          sendStderr(`[qmd daemon] All warm in ${elapsed}s\n`);
         }
         return { ok: true, data: { elapsed: parseFloat(elapsed), loaded, failed } };
       }

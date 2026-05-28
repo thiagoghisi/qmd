@@ -844,6 +844,17 @@ function initializeDatabase(db: Database): void {
     return Number.isFinite(v) && v >= 0 ? v : 5000;
   })();
   db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
+  // Verify the PRAGMA actually applied — bun:sqlite has had cases where it
+  // silently dropped PRAGMAs (e.g., journal_mode = OFF was ignored during
+  // the DiskANN migration). If the verified value differs from requested,
+  // surface it so future "database is locked" errors are diagnosable.
+  const verifiedBusyTimeout = (db.prepare("PRAGMA busy_timeout").get() as { timeout?: number } | undefined)?.timeout;
+  debug("db.init", "PRAGMAs applied", {
+    pid: process.pid,
+    requested_busy_timeout: busyTimeoutMs,
+    actual_busy_timeout: verifiedBusyTimeout,
+    journal_mode: (db.prepare("PRAGMA journal_mode").get() as { journal_mode?: string } | undefined)?.journal_mode,
+  });
 
   // Drop legacy tables that are now managed in YAML
   db.exec(`DROP TABLE IF EXISTS path_contexts`);
@@ -2266,11 +2277,81 @@ export function getCachedResult(db: Database, cacheKey: string): string | null {
   return row?.result || null;
 }
 
+/**
+ * Sync sleep using Atomics.wait — bun:sqlite is synchronous so we need a
+ * blocking wait, not setTimeout.
+ */
+function sleepSyncMs(ms: number): void {
+  const sab = new SharedArrayBuffer(4);
+  const i32 = new Int32Array(sab);
+  Atomics.wait(i32, 0, 0, ms);
+}
+
+/**
+ * Run a small write, retrying with exponential backoff on
+ * SQLITE_BUSY_SNAPSHOT (a WAL-mode race where another connection committed
+ * between our snapshot acquisition and our write). busy_timeout does NOT
+ * cover this case — the retry forces a fresh snapshot. Backoffs: 50ms,
+ * 200ms, 500ms — total ~750ms worst case before giving up.
+ */
+function runWriteWithSnapshotRetry(label: string, fn: () => void): void {
+  const backoffMs = [50, 200, 500];
+  const t0 = Date.now();
+  for (let attempt = 0; attempt <= backoffMs.length; attempt++) {
+    try {
+      fn();
+      if (attempt > 0) {
+        debug("db.write", `${label} succeeded on retry`, { attempt: attempt + 1, totalMs: Date.now() - t0, pid: process.pid });
+      } else {
+        const elapsed = Date.now() - t0;
+        if (elapsed > 100) debug("db.write", `${label} slow`, { ms: elapsed, pid: process.pid });
+      }
+      return;
+    } catch (err) {
+      const errStr = String(err);
+      const isBusy = errStr.includes("SQLITE_BUSY_SNAPSHOT") || errStr.includes("database is locked");
+      const isLastAttempt = attempt >= backoffMs.length;
+      if (!isBusy || isLastAttempt) {
+        debug("db.write", `${label} FAILED`, {
+          attempt: attempt + 1,
+          totalMs: Date.now() - t0,
+          pid: process.pid,
+          error: errStr,
+        });
+        throw err;
+      }
+      const wait = backoffMs[attempt]!;
+      debug("db.write", `${label} BUSY_SNAPSHOT, backoff ${wait}ms`, {
+        attempt: attempt + 1,
+        pid: process.pid,
+      });
+      sleepSyncMs(wait);
+    }
+  }
+}
+
 export function setCachedResult(db: Database, cacheKey: string, result: string): void {
   const now = new Date().toISOString();
-  db.prepare(`INSERT OR REPLACE INTO llm_cache (hash, result, created_at) VALUES (?, ?, ?)`).run(cacheKey, result, now);
+  // Cache write isn't critical — if all retries exhaust, log and continue.
+  // Better for the caller (user-facing query) to succeed without caching
+  // than to error out entirely.
+  try {
+    runWriteWithSnapshotRetry(`llm_cache INSERT [${cacheKey.slice(0, 12)}]`, () => {
+      db.prepare(`INSERT OR REPLACE INTO llm_cache (hash, result, created_at) VALUES (?, ?, ?)`).run(cacheKey, result, now);
+    });
+  } catch (err) {
+    debug("db.write", `llm_cache INSERT GIVING UP — query continues without caching`, {
+      pid: process.pid,
+      error: String(err),
+    });
+    return;
+  }
   if (Math.random() < 0.01) {
-    db.exec(`DELETE FROM llm_cache WHERE hash NOT IN (SELECT hash FROM llm_cache ORDER BY created_at DESC LIMIT 1000)`);
+    try {
+      runWriteWithSnapshotRetry(`llm_cache prune`, () => {
+        db.exec(`DELETE FROM llm_cache WHERE hash NOT IN (SELECT hash FROM llm_cache ORDER BY created_at DESC LIMIT 1000)`);
+      });
+    } catch (_err) { /* prune is opportunistic; ignore failures */ }
   }
 }
 

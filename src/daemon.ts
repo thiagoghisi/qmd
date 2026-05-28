@@ -400,9 +400,23 @@ export async function startDaemonServer(): Promise<void> {
 
           return { ok: true, data: { results, query } };
         } catch (err: any) {
-          debug("daemon.vsearch", "ERROR", { error: err?.message || String(err), stack: err?.stack?.split("\n").slice(0, 3) });
+          const errMsg = err?.message || String(err);
+          debug("daemon.vsearch", "ERROR", { error: errMsg, stack: err?.stack?.split("\n").slice(0, 3) });
+          // On "database is locked", dump the active process list so we can
+          // identify what's holding the write lock. Use require()'d child_process
+          // since we already have it imported elsewhere in this file.
+          if (errMsg.includes("database is locked")) {
+            try {
+              const { execSync } = await import("node:child_process");
+              const pids = execSync("pgrep -af 'bun.*qmd|qmd' 2>/dev/null | head -20", { encoding: "utf-8" }).trim();
+              debug("daemon.vsearch", "LOCK CONTEXT — processes that might hold the lock", {
+                self_pid: process.pid,
+                candidates: pids.split("\n").slice(0, 10),
+              });
+            } catch (_e) { /* ignore probe failure */ }
+          }
           console.error(`[qmd daemon] vsearch error:`, err);
-          return { ok: false, error: `vsearch failed: ${err?.message || err}` };
+          return { ok: false, error: `vsearch failed: ${errMsg}` };
         } finally {
           process.stderr.write = origWrite;
         }

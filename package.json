@@ -61,7 +61,7 @@
     "fast-glob": "3.3.3",
     "node-llama-cpp": "3.18.1",
     "picomatch": "4.0.4",
-    "sqlite-vec": "0.1.9",
+    "sqlite-vec": "0.1.10-alpha.4",
     "tree-sitter-go": "0.25.0",
     "tree-sitter-python": "0.25.0",
     "tree-sitter-rust": "0.24.0",

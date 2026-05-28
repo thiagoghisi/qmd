@@ -833,6 +833,17 @@ function initializeDatabase(db: Database): void {
   }
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
+  // busy_timeout=5000ms lets a connection WAIT for a busy lock instead of
+  // erroring immediately. Concretely: the 5am regression test spawns many
+  // short `qmd search` subprocesses that briefly hold write locks (e.g. for
+  // llm_cache updates) — without busy_timeout the daemon's vsearch path
+  // returned "database is locked" within ms (~9 events at 09:00 UTC on
+  // 2026-05-28). Override via QMD_SQLITE_BUSY_TIMEOUT_MS env var.
+  const busyTimeoutMs = (() => {
+    const v = parseInt(process.env.QMD_SQLITE_BUSY_TIMEOUT_MS ?? "", 10);
+    return Number.isFinite(v) && v >= 0 ? v : 5000;
+  })();
+  db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
 
   // Drop legacy tables that are now managed in YAML
   db.exec(`DROP TABLE IF EXISTS path_contexts`);

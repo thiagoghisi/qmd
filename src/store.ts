@@ -3744,11 +3744,22 @@ export async function searchVec(db: Database, query: string, model: string, limi
   if (vecResults.length === 0) return [];
 
   // Step 2: Get chunk info and document data
+  // Decompose each hash_seq string ("<hash>_<seq>") into a (hash, seq) tuple
+  // so the WHERE clause can use the composite PRIMARY KEY on
+  // content_vectors(hash, seq). The earlier form,
+  //   WHERE cv.hash || '_' || cv.seq IN (?, ?, ...)
+  // performs a full table scan because the index can't be used on a computed
+  // expression. Benchmarked (2026-05-28 PROD index, 540K vectors, 10 hash_seqs):
+  //   string-concat IN: 376ms p50  (post-DiskANN, this was the new bottleneck)
+  //   tuple IN VALUES:  2.7ms p50  (~135× faster, uses sqlite_autoindex_content_vectors_1)
   const hashSeqs = vecResults.map(r => r.hash_seq);
   const distanceMap = new Map(vecResults.map(r => [r.hash_seq, r.distance]));
+  const hashSeqPairs = vecResults.map((r) => {
+    const sep = r.hash_seq.lastIndexOf('_');
+    return { hash: r.hash_seq.slice(0, sep), seq: parseInt(r.hash_seq.slice(sep + 1), 10) };
+  });
 
-  // Build query for document lookup
-  const placeholders = hashSeqs.map(() => '?').join(',');
+  const placeholders = hashSeqPairs.map(() => '(?, ?)').join(',');
   let docSql = `
     SELECT
       cv.hash || '_' || cv.seq as hash_seq,
@@ -3761,9 +3772,12 @@ export async function searchVec(db: Database, query: string, model: string, limi
     FROM content_vectors cv
     JOIN documents d ON d.hash = cv.hash AND d.active = 1
     JOIN content ON content.hash = d.hash
-    WHERE cv.hash || '_' || cv.seq IN (${placeholders})
+    WHERE (cv.hash, cv.seq) IN (VALUES ${placeholders})
   `;
-  const params: string[] = [...hashSeqs];
+  const params: (string | number)[] = [];
+  for (const p of hashSeqPairs) {
+    params.push(p.hash, p.seq);
+  }
 
   if (collectionName) {
     docSql += ` AND d.collection = ?`;

@@ -1294,7 +1294,7 @@ export type Store = {
   toVirtualPath: (absolutePath: string) => string | null;
 
   // Search
-  searchFTS: (query: string, limit?: number, collectionName?: string) => SearchResult[];
+  searchFTS: (query: string, limit?: number, collectionName?: string, options?: { noNicheBoost?: boolean }) => SearchResult[];
   searchVec: (query: string, model: string, limit?: number, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[], options?: { noBM25Anchor?: boolean }) => Promise<SearchResult[]>;
 
   // Query expansion & reranking
@@ -1973,7 +1973,7 @@ export function createStore(dbPath?: string): Store {
     toVirtualPath: (absolutePath: string) => toVirtualPath(db, absolutePath),
 
     // Search
-    searchFTS: (query: string, limit?: number, collectionName?: string) => searchFTS(db, query, limit, collectionName),
+    searchFTS: (query: string, limit?: number, collectionName?: string, options?: { noNicheBoost?: boolean }) => searchFTS(db, query, limit, collectionName, options),
     searchVec: (query: string, model: string, limit?: number, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[], options?: { noBM25Anchor?: boolean }) => searchVec(db, query, model, limit, collectionName, session, precomputedEmbedding, options),
 
     // Query expansion & reranking
@@ -3623,7 +3623,7 @@ export function validateLexQuery(query: string): string | null {
   return null;
 }
 
-export function searchFTS(db: Database, query: string, limit: number = 20, collectionName?: string): SearchResult[] {
+export function searchFTS(db: Database, query: string, limit: number = 20, collectionName?: string, options?: { noNicheBoost?: boolean }): SearchResult[] {
   const ftsQuery = buildFTS5Query(query);
   debug("fts", "search", { query, ftsQuery: ftsQuery || "(empty)", limit, collection: collectionName || "all" });
   if (!ftsQuery) return [];
@@ -3636,9 +3636,31 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
   const params: (string | number)[] = [ftsQuery];
 
   // When filtering by collection, fetch extra candidates from the FTS index
-  // since some will be filtered out. Without a collection filter we can
-  // fetch exactly the requested limit.
-  const ftsLimit = collectionName ? limit * 10 : limit;
+  // since some will be filtered out by the collection clause below.
+  // For niche collections (sub-1% of corpus), the global FTS top-N is
+  // dominated by larger collections that match more query terms — e.g. for
+  // `search -c reddit-comments "financial independence"`, the first
+  // reddit-comments hit sits at global rank ~540 because snipd-podcasts,
+  // readwise-highlights, and fire-journey dominate the top of the BM25
+  // ranking. Scale ftsLimit to land ~NICHE_FTS_TARGET_HITS from the target
+  // collection in the global pool, capped at NICHE_FTS_LIMIT_CAP.
+  let ftsLimit: number;
+  if (!collectionName) {
+    ftsLimit = limit;
+  } else if (options?.noNicheBoost) {
+    // Caller (hybrid `query` path) is feeding RRF + rerank — extra niche
+    // candidates destabilize that pipeline. Keep the small fixed multiplier.
+    ftsLimit = limit * 10;
+  } else {
+    const { perCollection, total } = getCollectionVectorCounts(db);
+    const share = total > 0 ? (perCollection.get(collectionName) ?? 0) / total : 0;
+    if (share > 0 && share < NICHE_COLLECTION_SHARE_THRESHOLD) {
+      const required = Math.ceil(NICHE_FTS_TARGET_HITS / share);
+      ftsLimit = Math.min(Math.max(required, limit * 10), NICHE_FTS_LIMIT_CAP);
+    } else {
+      ftsLimit = limit * 10;
+    }
+  }
 
   let sql = `
     WITH fts_matches AS (
@@ -3670,10 +3692,13 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
   sql += ` ORDER BY fm.bm25_score ASC LIMIT ?`;
   params.push(limit);
 
-  const rows = trackDbOp(`fts.match[${collectionName ?? "all"}]`, () =>
+  const rows = trackDbOp(`fts.match[${collectionName ?? "all"} ftsLimit=${ftsLimit}]`, () =>
     db.prepare(sql).all(...params) as { filepath: string; display_path: string; title: string; body: string; hash: string; bm25_score: number }[]
   );
-  debug("fts", `results: ${rows.length}`, rows.length > 0 ? { topScore: Math.abs(rows[0]!.bm25_score) / (1 + Math.abs(rows[0]!.bm25_score)), bottomScore: Math.abs(rows[rows.length - 1]!.bm25_score) / (1 + Math.abs(rows[rows.length - 1]!.bm25_score)) } : undefined);
+  debug("fts", `results: ${rows.length}`, {
+    ftsLimit,
+    ...(rows.length > 0 ? { topScore: Math.abs(rows[0]!.bm25_score) / (1 + Math.abs(rows[0]!.bm25_score)), bottomScore: Math.abs(rows[rows.length - 1]!.bm25_score) / (1 + Math.abs(rows[rows.length - 1]!.bm25_score)) } : {}),
+  });
   return rows.map(row => {
     const collectionName = row.filepath.split('//')[1]?.split('/')[0] || "";
     // Convert bm25 (negative, lower is better) into a stable [0..1) score where higher is better.
@@ -3726,6 +3751,8 @@ function getCollectionVectorCounts(db: Database): { perCollection: Map<string, n
 }
 
 const NICHE_COLLECTION_SHARE_THRESHOLD = 0.01;
+const NICHE_FTS_TARGET_HITS = 10;
+const NICHE_FTS_LIMIT_CAP = 10000;
 
 export async function searchVec(db: Database, query: string, model: string, limit: number = 20, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[], options?: { noBM25Anchor?: boolean }): Promise<SearchResult[]> {
   debug("vec", "search", { query: query.slice(0, 100), limit, collection: collectionName || "all", precomputed: !!precomputedEmbedding });
@@ -4934,7 +4961,7 @@ export async function hybridQuery(
   // match may not be what the caller wants (e.g. "performance" with intent
   // "web page load times" should NOT shortcut to a sports-performance doc).
   // Pass collection directly into FTS query (filter at SQL level, not post-hoc)
-  const initialFts = store.searchFTS(query, 20, collection);
+  const initialFts = store.searchFTS(query, 20, collection, { noNicheBoost: true });
   const topScore = initialFts[0]?.score ?? 0;
   const secondScore = initialFts[1]?.score ?? 0;
   const hasStrongSignal = !intent && initialFts.length > 0
@@ -4972,7 +4999,7 @@ export async function hybridQuery(
   // 3a: Run FTS for all lex expansions right away (no LLM needed)
   for (const q of expanded) {
     if (q.type === 'lex') {
-      const ftsResults = store.searchFTS(q.query, 20, collection);
+      const ftsResults = store.searchFTS(q.query, 20, collection, { noNicheBoost: true });
       if (ftsResults.length > 0) {
         for (const r of ftsResults) docidMap.set(r.filepath, r.docid);
         rankedLists.push(ftsResults.map(r => ({
@@ -5376,7 +5403,7 @@ export async function structuredSearch(
   for (const search of searches) {
     if (search.type === 'lex') {
       for (const coll of collectionList) {
-        const ftsResults = store.searchFTS(search.query, 20, coll);
+        const ftsResults = store.searchFTS(search.query, 20, coll, { noNicheBoost: true });
         if (ftsResults.length > 0) {
           for (const r of ftsResults) docidMap.set(r.filepath, r.docid);
           rankedLists.push(ftsResults.map(r => ({

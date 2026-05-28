@@ -443,7 +443,7 @@ export async function startDaemonServer(): Promise<void> {
           // followed by post-filtering loses recall in that case.
           const scopes = collectionScopes(collection);
           const initialFts = byScoreDesc(scopes.flatMap((scope) =>
-            store.searchFTS(query, 20, scope)
+            store.searchFTS(query, 20, scope, { noNicheBoost: true })
           ));
 
           const hasVectors = !!store.db.prepare(
@@ -484,7 +484,7 @@ export async function startDaemonServer(): Promise<void> {
 
             for (const q of ftsQueries) {
               const ftsResults = byScoreDesc(scopes.flatMap((scope) =>
-                store.searchFTS(q, 20, scope)
+                store.searchFTS(q, 20, scope, { noNicheBoost: true })
               ));
               if (ftsResults.length > 0) {
                 rankedLists.push(ftsResults.map((r: any) => {

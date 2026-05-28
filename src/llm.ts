@@ -1514,6 +1514,12 @@ export class LlamaCpp implements LLM {
       // Qwen3 recommended settings for non-thinking mode:
       // temp=0.7, topP=0.8, topK=20, presence_penalty for repetition
       // DO NOT use greedy decoding (temp=0) - causes infinite loops
+      //
+      // Fixed seed makes expansion deterministic across runs while keeping
+      // temp=0.7 (avoids the infinite-loop pathology of temp=0). Without a
+      // seed, the same query produced different sub-queries on each LLM call,
+      // causing pre-cache flakiness in regression tests (e.g. vsearch-c-kindle
+      // flipped 50/50 between 0 and 3 results across 10 fresh-cache runs).
       const result = await session.prompt(prompt, {
         grammar,
         // 350 tokens ≈ 10 lines × ~30 tokens each. Was 600 which let the LLM enter
@@ -1523,6 +1529,7 @@ export class LlamaCpp implements LLM {
         temperature: 0.7,
         topK: 20,
         topP: 0.8,
+        seed: 42,
         repeatPenalty: {
           // Stronger penalty on a wider window to break the templated-expansion loops.
           lastTokens: 128,

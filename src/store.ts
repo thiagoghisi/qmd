@@ -40,6 +40,63 @@ import type {
 } from "./collections.js";
 
 // =============================================================================
+// DB Operation Tracker — observability for SQLITE_BUSY_SNAPSHOT diagnosis
+// =============================================================================
+// Keeps a ring buffer of recent SQL ops with timings so when a write fails
+// with BUSY_SNAPSHOT we can see what statements ran around it (and whether
+// any reads might still be holding a snapshot).
+type DbOpEntry = {
+  seq: number;
+  op: string;
+  t0: number;
+  t1?: number;
+  ms?: number;
+  error?: string;
+};
+const dbOpHistory: DbOpEntry[] = [];
+let dbOpSeq = 0;
+const DB_OP_HISTORY_MAX = 100;
+const DB_OP_SLOW_MS = 50;
+
+function trackDbOp<T>(op: string, fn: () => T): T {
+  const seq = ++dbOpSeq;
+  const t0 = Date.now();
+  const entry: DbOpEntry = { seq, op, t0 };
+  dbOpHistory.push(entry);
+  if (dbOpHistory.length > DB_OP_HISTORY_MAX) dbOpHistory.shift();
+  try {
+    const result = fn();
+    entry.t1 = Date.now();
+    entry.ms = entry.t1 - t0;
+    if (entry.ms > DB_OP_SLOW_MS) {
+      debug("db.op", `${op} slow`, { seq, ms: entry.ms, pid: process.pid });
+    }
+    return result;
+  } catch (err) {
+    entry.t1 = Date.now();
+    entry.ms = entry.t1 - t0;
+    entry.error = String(err);
+    const isBusy = entry.error.includes("SQLITE_BUSY") || entry.error.includes("database is locked");
+    if (isBusy) {
+      // Dump the last 15 ops so we can see what may have caused the snapshot mismatch
+      const recent = dbOpHistory
+        .slice(-15)
+        .map((o) => ({ seq: o.seq, op: o.op, ms: o.ms ?? (Date.now() - o.t0), ...(o.error ? { error: o.error.slice(0, 80) } : {}) }));
+      debug("db.op", `${op} BUSY — recent ops`, {
+        seq,
+        ms: entry.ms,
+        pid: process.pid,
+        error: entry.error.slice(0, 120),
+        recent,
+      });
+    } else {
+      debug("db.op", `${op} FAILED`, { seq, ms: entry.ms, pid: process.pid, error: entry.error.slice(0, 120) });
+    }
+    throw err;
+  }
+}
+
+// =============================================================================
 // Configuration
 // =============================================================================
 
@@ -2273,8 +2330,10 @@ export function getCacheKey(url: string, body: object): string {
 }
 
 export function getCachedResult(db: Database, cacheKey: string): string | null {
-  const row = db.prepare(`SELECT result FROM llm_cache WHERE hash = ?`).get(cacheKey) as { result: string } | null;
-  return row?.result || null;
+  return trackDbOp(`llm_cache.get`, () => {
+    const row = db.prepare(`SELECT result FROM llm_cache WHERE hash = ?`).get(cacheKey) as { result: string } | null;
+    return row?.result || null;
+  });
 }
 
 /**
@@ -2330,14 +2389,62 @@ function runWriteWithSnapshotRetry(label: string, fn: () => void): void {
   }
 }
 
+// Lazy cache-writer connection — separate from the main connection so the
+// read snapshot held there can't block our writes.
+// Verified empirically: bun:sqlite's read snapshot from getCachedResult
+// persists across the 10s LLM call AND is NOT bypassed by:
+//   - db.transaction(...)
+//   - explicit BEGIN IMMEDIATE / COMMIT
+//   - PRAGMA busy_timeout = 5000
+// The ONLY thing that works is a separate connection that has its own
+// independent snapshot lifecycle.
+let cacheWriterDb: Database | null = null;
+let cacheWriterDbPath: string | null = null;
+
+function getCacheWriterDb(mainDb: Database): Database {
+  // bun:sqlite exposes filename on the Database object
+  const dbPath = (mainDb as unknown as { filename?: string }).filename;
+  if (!dbPath) {
+    throw new Error("Cannot determine DB path for cache writer connection");
+  }
+  if (cacheWriterDb && cacheWriterDbPath === dbPath) {
+    return cacheWriterDb;
+  }
+  // Path changed or first call — open a fresh writer connection
+  if (cacheWriterDb) {
+    try { cacheWriterDb.close(); } catch { /* ignore */ }
+  }
+  cacheWriterDb = openDatabase(dbPath);
+  cacheWriterDbPath = dbPath;
+  // Minimal PRAGMA setup on this connection — just enough for the cache table.
+  // We do NOT run initializeDatabase here (would recreate triggers).
+  cacheWriterDb.exec("PRAGMA journal_mode = WAL");
+  cacheWriterDb.exec("PRAGMA busy_timeout = 5000");
+  debug("db.init", "cache-writer connection opened", { pid: process.pid, path: dbPath });
+  return cacheWriterDb;
+}
+
 export function setCachedResult(db: Database, cacheKey: string, result: string): void {
   const now = new Date().toISOString();
-  // Cache write isn't critical — if all retries exhaust, log and continue.
-  // Better for the caller (user-facing query) to succeed without caching
-  // than to error out entirely.
+  // Cache writes use a dedicated connection so the read snapshot held by
+  // the main connection (from the earlier getCachedResult) can't cause
+  // SQLITE_BUSY_SNAPSHOT. busy_timeout=5000 on this connection covers
+  // any cross-process write contention (rare).
+  let writerDb: Database;
+  try {
+    writerDb = getCacheWriterDb(db);
+  } catch (err) {
+    debug("db.write", `llm_cache writer connection unavailable; skipping cache`, {
+      pid: process.pid,
+      error: String(err),
+    });
+    return;
+  }
   try {
     runWriteWithSnapshotRetry(`llm_cache INSERT [${cacheKey.slice(0, 12)}]`, () => {
-      db.prepare(`INSERT OR REPLACE INTO llm_cache (hash, result, created_at) VALUES (?, ?, ?)`).run(cacheKey, result, now);
+      trackDbOp(`llm_cache.insert`, () => {
+        writerDb.prepare(`INSERT OR REPLACE INTO llm_cache (hash, result, created_at) VALUES (?, ?, ?)`).run(cacheKey, result, now);
+      });
     });
   } catch (err) {
     debug("db.write", `llm_cache INSERT GIVING UP — query continues without caching`, {
@@ -2349,7 +2456,9 @@ export function setCachedResult(db: Database, cacheKey: string, result: string):
   if (Math.random() < 0.01) {
     try {
       runWriteWithSnapshotRetry(`llm_cache prune`, () => {
-        db.exec(`DELETE FROM llm_cache WHERE hash NOT IN (SELECT hash FROM llm_cache ORDER BY created_at DESC LIMIT 1000)`);
+        trackDbOp(`llm_cache.prune`, () => {
+          writerDb.exec(`DELETE FROM llm_cache WHERE hash NOT IN (SELECT hash FROM llm_cache ORDER BY created_at DESC LIMIT 1000)`);
+        });
       });
     } catch (_err) { /* prune is opportunistic; ignore failures */ }
   }
@@ -3561,7 +3670,9 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
   sql += ` ORDER BY fm.bm25_score ASC LIMIT ?`;
   params.push(limit);
 
-  const rows = db.prepare(sql).all(...params) as { filepath: string; display_path: string; title: string; body: string; hash: string; bm25_score: number }[];
+  const rows = trackDbOp(`fts.match[${collectionName ?? "all"}]`, () =>
+    db.prepare(sql).all(...params) as { filepath: string; display_path: string; title: string; body: string; hash: string; bm25_score: number }[]
+  );
   debug("fts", `results: ${rows.length}`, rows.length > 0 ? { topScore: Math.abs(rows[0]!.bm25_score) / (1 + Math.abs(rows[0]!.bm25_score)), bottomScore: Math.abs(rows[rows.length - 1]!.bm25_score) / (1 + Math.abs(rows[rows.length - 1]!.bm25_score)) } : undefined);
   return rows.map(row => {
     const collectionName = row.filepath.split('//')[1]?.split('/')[0] || "";
@@ -3613,11 +3724,13 @@ export async function searchVec(db: Database, query: string, model: string, limi
   // Keep multiplier modest to avoid GPU OOM on Metal (Mac Mini 8GB).
   const kMultiplier = collectionName ? 8 : 3;
   const scanStart = Date.now();
-  const vecResults = db.prepare(`
-    SELECT hash_seq, distance
-    FROM vectors_vec
-    WHERE embedding MATCH ? AND k = ?
-  `).all(new Float32Array(embedding), limit * kMultiplier) as { hash_seq: string; distance: number }[];
+  const vecResults = trackDbOp(`vec.match[${collectionName ?? "all"} k=${limit * kMultiplier}]`, () =>
+    db.prepare(`
+      SELECT hash_seq, distance
+      FROM vectors_vec
+      WHERE embedding MATCH ? AND k = ?
+    `).all(new Float32Array(embedding), limit * kMultiplier) as { hash_seq: string; distance: number }[]
+  );
   const scanMs = Date.now() - scanStart;
 
   debug("vec", `sqlite-vec returned ${vecResults.length} matches`, {
@@ -3657,10 +3770,10 @@ export async function searchVec(db: Database, query: string, model: string, limi
     params.push(collectionName);
   }
 
-  const docRows = withLazyContentVectorMigration(db, () => db.prepare(docSql).all(...params) as {
+  const docRows = withLazyContentVectorMigration(db, () => trackDbOp(`vec.docs[${collectionName ?? "all"}]`, () => db.prepare(docSql).all(...params) as {
     hash_seq: string; hash: string; pos: number; filepath: string;
     display_path: string; title: string; body: string;
-  }[]);
+  }[]));
 
   if (collectionName) {
     debug("vec", "collection-filter", {

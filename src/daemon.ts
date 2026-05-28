@@ -499,7 +499,7 @@ export async function startDaemonServer(): Promise<void> {
                 searchPromises.push((async () => {
                   const vecResults: any[] = [];
                   for (const scope of scopes) {
-                    vecResults.push(...await store.searchVec(q, DEFAULT_EMBED_MODEL, 20, scope));
+                    vecResults.push(...await store.searchVec(q, DEFAULT_EMBED_MODEL, 20, scope, undefined, undefined, { noBM25Anchor: true }));
                   }
                   byScoreDesc(vecResults);
                   if (vecResults.length > 0) {

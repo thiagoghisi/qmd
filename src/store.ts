@@ -1295,7 +1295,7 @@ export type Store = {
 
   // Search
   searchFTS: (query: string, limit?: number, collectionName?: string) => SearchResult[];
-  searchVec: (query: string, model: string, limit?: number, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[]) => Promise<SearchResult[]>;
+  searchVec: (query: string, model: string, limit?: number, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[], options?: { noBM25Anchor?: boolean }) => Promise<SearchResult[]>;
 
   // Query expansion & reranking
   expandQuery: (query: string, model?: string, intent?: string) => Promise<ExpandedQuery[]>;
@@ -1974,7 +1974,7 @@ export function createStore(dbPath?: string): Store {
 
     // Search
     searchFTS: (query: string, limit?: number, collectionName?: string) => searchFTS(db, query, limit, collectionName),
-    searchVec: (query: string, model: string, limit?: number, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[]) => searchVec(db, query, model, limit, collectionName, session, precomputedEmbedding),
+    searchVec: (query: string, model: string, limit?: number, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[], options?: { noBM25Anchor?: boolean }) => searchVec(db, query, model, limit, collectionName, session, precomputedEmbedding, options),
 
     // Query expansion & reranking
     expandQuery: (query: string, model?: string, intent?: string) => expandQuery(query, model ?? store.llm?.generateModelName ?? DEFAULT_QUERY_MODEL, db, intent, store.llm),
@@ -3727,7 +3727,7 @@ function getCollectionVectorCounts(db: Database): { perCollection: Map<string, n
 
 const NICHE_COLLECTION_SHARE_THRESHOLD = 0.01;
 
-export async function searchVec(db: Database, query: string, model: string, limit: number = 20, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[]): Promise<SearchResult[]> {
+export async function searchVec(db: Database, query: string, model: string, limit: number = 20, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[], options?: { noBM25Anchor?: boolean }): Promise<SearchResult[]> {
   debug("vec", "search", { query: query.slice(0, 100), limit, collection: collectionName || "all", precomputed: !!precomputedEmbedding });
   const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
   if (!tableExists) { debug("vec", "no vectors_vec table"); return []; }
@@ -3847,10 +3847,14 @@ export async function searchVec(db: Database, query: string, model: string, limi
   // contains the exact query keywords (e.g., "shame shutdown vulnerability"
   // BM25-hits therapy notes that DiskANN's beam never reaches).
   //
+  // Skipped when the caller is already running BM25 in parallel (hybrid
+  // `query` path) — that path's RRF merge would double-count the anchored
+  // hits and bias rerank toward BM25-only matches over balanced ones.
+  //
   // Three-step query pattern to avoid the documented vec0 + JOIN hang
   // (see lines 3760-3763): (1) BM25 hits → hashes, (2) vec0 distances on the
   // chunk-level hash_seqs by plain SELECT (no MATCH), (3) doc metadata join.
-  const shouldUseBM25Anchor = !collectionName || _isNiche;
+  const shouldUseBM25Anchor = (!collectionName || _isNiche) && !options?.noBM25Anchor;
   if (shouldUseBM25Anchor) {
     const ftsAnchorLimit = Math.max(limit * 4, 20);
     const ftsResults = searchFTS(db, query, ftsAnchorLimit, collectionName);
@@ -5007,7 +5011,7 @@ export async function hybridQuery(
 
       const vecResults = await store.searchVec(
         vecQueries[i]!.text, embedModel, 20, collection,
-        undefined, embedding
+        undefined, embedding, { noBM25Anchor: true }
       );
       if (vecResults.length > 0) {
         for (const r of vecResults) docidMap.set(r.filepath, r.docid);
@@ -5411,7 +5415,7 @@ export async function structuredSearch(
         for (const coll of collectionList) {
           const vecResults = await store.searchVec(
             vecSearches[i]!.query, embedModel, 20, coll,
-            undefined, embedding
+            undefined, embedding, { noBM25Anchor: true }
           );
           if (vecResults.length > 0) {
             for (const r of vecResults) docidMap.set(r.filepath, r.docid);

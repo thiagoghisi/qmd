@@ -3702,6 +3702,31 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
 // Vector Search
 // =============================================================================
 
+// Memoized per-collection vector counts. Used by searchVec to detect niche
+// collections (sub-1% of total vectors) so we can enable BM25-anchored
+// augmentation only where it pays off. Cache invalidates when the total
+// vector count changes (cheap COUNT(*) check).
+let _collectionVectorCounts: Map<string, number> | null = null;
+let _cachedTotalVectorCount: number | null = null;
+
+function getCollectionVectorCounts(db: Database): { perCollection: Map<string, number>; total: number } {
+  const currentTotal = (db.prepare(`SELECT COUNT(*) as c FROM content_vectors`).get() as { c: number }).c;
+  if (_cachedTotalVectorCount === currentTotal && _collectionVectorCounts) {
+    return { perCollection: _collectionVectorCounts, total: currentTotal };
+  }
+  const rows = db.prepare(`
+    SELECT d.collection, COUNT(*) as n
+    FROM content_vectors cv
+    JOIN documents d ON d.hash = cv.hash
+    GROUP BY d.collection
+  `).all() as { collection: string; n: number }[];
+  _collectionVectorCounts = new Map(rows.map(r => [r.collection, r.n]));
+  _cachedTotalVectorCount = currentTotal;
+  return { perCollection: _collectionVectorCounts, total: currentTotal };
+}
+
+const NICHE_COLLECTION_SHARE_THRESHOLD = 0.01;
+
 export async function searchVec(db: Database, query: string, model: string, limit: number = 20, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[]): Promise<SearchResult[]> {
   debug("vec", "search", { query: query.slice(0, 100), limit, collection: collectionName || "all", precomputed: !!precomputedEmbedding });
   const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
@@ -3723,6 +3748,11 @@ export async function searchVec(db: Database, query: string, model: string, limi
   // needs a wider net to find matches within that collection.
   // Keep multiplier modest to avoid GPU OOM on Metal (Mac Mini 8GB).
   const kMultiplier = collectionName ? 8 : 3;
+  // Compute niche-ness for BM25 anchor decision below (cheap cached lookup).
+  const _counts = collectionName ? getCollectionVectorCounts(db) : null;
+  const _collectionVectors = _counts ? (_counts.perCollection.get(collectionName!) ?? 0) : 0;
+  const _collectionShare = _counts && _counts.total > 0 ? _collectionVectors / _counts.total : 0;
+  const _isNiche = !!collectionName && _collectionShare > 0 && _collectionShare < NICHE_COLLECTION_SHARE_THRESHOLD;
   const scanStart = Date.now();
   const vecResults = trackDbOp(`vec.match[${collectionName ?? "all"} k=${limit * kMultiplier}]`, () =>
     db.prepare(`
@@ -3809,6 +3839,91 @@ export async function searchVec(db: Database, query: string, model: string, limi
   }
 
   debug("vec", `deduped ${docRows.length} rows → ${seen.size} unique files`);
+
+  // L3 — BM25-anchored augmentation. For niche-scoped and global queries,
+  // run BM25 on the same query and inject its hits into the candidate pool
+  // with their actual cosine distances. This rescues cases where the embedding
+  // model places the query embedding far from a doc semantically but the doc
+  // contains the exact query keywords (e.g., "shame shutdown vulnerability"
+  // BM25-hits therapy notes that DiskANN's beam never reaches).
+  //
+  // Three-step query pattern to avoid the documented vec0 + JOIN hang
+  // (see lines 3760-3763): (1) BM25 hits → hashes, (2) vec0 distances on the
+  // chunk-level hash_seqs by plain SELECT (no MATCH), (3) doc metadata join.
+  const shouldUseBM25Anchor = !collectionName || _isNiche;
+  if (shouldUseBM25Anchor) {
+    const ftsAnchorLimit = Math.max(limit * 4, 20);
+    const ftsResults = searchFTS(db, query, ftsAnchorLimit, collectionName);
+    const ftsHashesNotSeen = ftsResults
+      .filter(r => !seen.has(r.filepath))
+      .map(r => r.hash);
+    if (ftsHashesNotSeen.length > 0) {
+      const ftsPlaceholders = ftsHashesNotSeen.map(() => '?').join(',');
+      // Step A: get chunk-level hash_seq list for these BM25-hit docs
+      const chunkRows = db.prepare(`
+        SELECT hash || '_' || seq as hash_seq, hash, seq, pos
+        FROM content_vectors
+        WHERE hash IN (${ftsPlaceholders})
+      `).all(...ftsHashesNotSeen) as { hash_seq: string; hash: string; seq: number; pos: number }[];
+      if (chunkRows.length > 0) {
+        // Step B: query vec0 for distances — plain SELECT, no MATCH, no JOIN
+        const hashSeqList = chunkRows.map(c => c.hash_seq);
+        const hashSeqPh = hashSeqList.map(() => '?').join(',');
+        const distRows = trackDbOp(`vec.bm25-anchor[${collectionName ?? "all"} n=${hashSeqList.length}]`, () =>
+          db.prepare(`
+            SELECT hash_seq, vec_distance_cosine(embedding, ?) as distance
+            FROM vectors_vec
+            WHERE hash_seq IN (${hashSeqPh})
+          `).all(new Float32Array(embedding), ...hashSeqList) as { hash_seq: string; distance: number }[]
+        );
+        const distanceByHashSeq = new Map(distRows.map(r => [r.hash_seq, r.distance]));
+        // Step C: join doc metadata for the BM25-hit hashes (separate from vec0 — safe)
+        const docPlaceholders = ftsHashesNotSeen.map(() => '?').join(',');
+        const docRowsForFts = db.prepare(`
+          SELECT
+            d.hash,
+            'qmd://' || d.collection || '/' || d.path as filepath,
+            d.collection || '/' || d.path as display_path,
+            d.title,
+            content.doc as body
+          FROM documents d
+          JOIN content ON content.hash = d.hash
+          WHERE d.hash IN (${docPlaceholders}) AND d.active = 1
+          ${collectionName ? ` AND d.collection = ?` : ""}
+        `).all(...ftsHashesNotSeen, ...(collectionName ? [collectionName] : [])) as {
+          hash: string; filepath: string; display_path: string; title: string; body: string;
+        }[];
+        const docByHash = new Map(docRowsForFts.map(r => [r.hash, r]));
+        // Build SearchResult-row shapes per chunk and inject into seen with best-distance dedup
+        let injected = 0;
+        let updated = 0;
+        for (const chunk of chunkRows) {
+          const dist = distanceByHashSeq.get(chunk.hash_seq);
+          if (dist === undefined) continue;
+          const docRow = docByHash.get(chunk.hash);
+          if (!docRow) continue;
+          const row = {
+            hash_seq: chunk.hash_seq,
+            hash: chunk.hash,
+            pos: chunk.pos,
+            filepath: docRow.filepath,
+            display_path: docRow.display_path,
+            title: docRow.title,
+            body: docRow.body,
+          };
+          const existing = seen.get(row.filepath);
+          if (!existing) {
+            seen.set(row.filepath, { row, bestDist: dist });
+            injected++;
+          } else if (dist < existing.bestDist) {
+            seen.set(row.filepath, { row, bestDist: dist });
+            updated++;
+          }
+        }
+        debug("vec", `bm25-anchor: ${ftsResults.length} fts hits → ${ftsHashesNotSeen.length} not in vec pool → ${chunkRows.length} chunks scored → +${injected} new, ${updated} improved`);
+      }
+    }
+  }
 
   return Array.from(seen.values())
     .sort((a, b) => a.bestDist - b.bestDist)

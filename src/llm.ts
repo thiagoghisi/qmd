@@ -1465,29 +1465,27 @@ export class LlamaCpp implements LLM {
   // High-level abstractions
   // ==========================================================================
 
-  async expandQuery(query: string, options: { context?: string, includeLexical?: boolean, intent?: string, _retryCount?: number } = {}): Promise<Queryable[]> {
+  async expandQuery(query: string, options: { context?: string, includeLexical?: boolean, intent?: string } = {}): Promise<Queryable[]> {
     if (this._ciMode) throw new Error("LLM operations are disabled in CI (set CI=true)");
     // Ping activity at start to keep models alive during this operation
     this.touchActivity();
     const t0 = Date.now();
-    debug("llm.expand", "call", { query: query.slice(0, 100), model: "generate", attempt: (options._retryCount ?? 0) + 1 });
+    debug("llm.expand", "call", { query: query.slice(0, 100), model: "generate" });
 
-    // Order matters: ensureGenerateModel may internally trigger a fresh llama
-    // load if disposal happened between calls. Capturing `llama` BEFORE that
-    // could leave us with a stale instance, producing the LlamaGrammar
-    // cross-instance error ("created with a different Llama instance than the
-    // one used by this sequence's model"). Get llama AFTER the model is
-    // resolved so both come from the same llama. The earlier order-swap fix
-    // (01d31b0) handles the common case but a residual race still exists when
-    // disposal happens BETWEEN ensureGenerateModel and grammar/context
-    // creation — see the retry-on-mismatch catch block at the end.
+    // Derive the llama from the model itself — node-llama-cpp exposes it as
+    // a public getter (LlamaModel.llama). This GUARANTEES the grammar and
+    // the context-sequence are bound to the same Llama instance, which the
+    // prior fixes (01d31b0 order-swap + a927d83 capture-and-retry) only
+    // approximated. The previous approaches still failed when this.llama
+    // was reassigned after model load (the GPU auto-probe path swaps llama
+    // mid-init), leaving this.generateModel bound to a now-stale instance.
     const generateModel = await this.ensureGenerateModel();
-    const llama = await this.ensureLlama();
+    const modelLlama = generateModel.llama;
 
     const includeLexical = options.includeLexical ?? true;
     const context = options.context;
 
-    const grammar = await llama.createGrammar({
+    const grammar = await modelLlama.createGrammar({
       grammar: `
         root ::= line+
         line ::= type ": " content "\\n"
@@ -1582,29 +1580,14 @@ export class LlamaCpp implements LLM {
       debug("llm.expand", `fallback (no valid output) in ${Date.now() - t0}ms`, { results: fb.length });
       return fb;
     } catch (error) {
-      const errStr = String(error);
-      const isGrammarCrossInstance = errStr.includes("different Llama instance");
-      const retryCount = options._retryCount ?? 0;
-
-      if (isGrammarCrossInstance && retryCount < 1) {
-        // Residual race: disposal happened between our ensureGenerateModel/
-        // ensureLlama capture and the grammar/context creation. A fresh call
-        // re-acquires both refs under whatever the current llama is now,
-        // which should be stable for the next attempt's duration. We cap at
-        // one retry to avoid infinite loops if the race becomes pathological.
-        debug("llm.expand", `grammar cross-instance race; retrying once`, { error: errStr });
-        try { await genContext.dispose(); } catch { /* ignore */ }
-        return await this.expandQuery(query, { ...options, _retryCount: retryCount + 1 });
-      }
-
-      debug("llm.expand", `ERROR in ${Date.now() - t0}ms`, { error: errStr, retryCount });
+      debug("llm.expand", `ERROR in ${Date.now() - t0}ms`, { error: String(error) });
       console.error("Structured query expansion failed:", error);
       // Fallback to original query
       const fallback: Queryable[] = [{ type: 'vec', text: query }];
       if (includeLexical) fallback.unshift({ type: 'lex', text: query });
       return fallback;
     } finally {
-      try { await genContext.dispose(); } catch { /* may already be disposed by retry path */ }
+      try { await genContext.dispose(); } catch { /* ignore double-dispose */ }
     }
   }
 

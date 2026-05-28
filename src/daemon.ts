@@ -357,10 +357,22 @@ export async function startDaemonServer(): Promise<void> {
           sendStderr(`Expanded to ${queries.length} queries, searching vectors...\n`);
 
           // Collect results
+          // Always include the original query alongside vec/hyde expansions —
+          // the user-typed phrasing is often the best semantic match and the
+          // LLM-generated alternatives can drift far from the source intent
+          // (deterministic example: "mortality death existential meaning"
+          // expanded to "overview of existential" which doesn't reach
+          // kindle-highlights vectors, but the original query does).
+          // Lex-typed expansions target BM25 in the hybrid path; skip them
+          // in pure vsearch to avoid wasted vec scans.
           const allResults = new Map<string, any>();
-          for (const q of queries) {
-            // ExpandedQuery is now { type, query } — pass the string + singleCollection for wider k
-            const queryText = typeof q === 'string' ? q : q.query;
+          const queryTexts = [
+            query,
+            ...queries
+              .filter(q => typeof q === 'string' || q.type !== 'lex')
+              .map(q => typeof q === 'string' ? q : q.query),
+          ];
+          for (const queryText of queryTexts) {
             for (const scope of collectionScopes(collection)) {
               const vecResults = await store.searchVec(queryText, DEFAULT_EMBED_MODEL, limit, scope);
               for (const r of vecResults) {

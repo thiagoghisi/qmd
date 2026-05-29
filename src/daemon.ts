@@ -18,7 +18,7 @@
  *              then final { "ok": true, "data": ... }
  */
 
-import { unlinkSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { unlinkSync, existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from "node:fs";
 import { debug } from "./debug.js";
 import { createServer, connect, type Socket } from "node:net";
 import { homedir } from "node:os";
@@ -48,22 +48,38 @@ type DaemonRankedResult = RankedResult & {
  * Check if a daemon is running and reachable.
  */
 export function isDaemonRunning(): boolean {
-  if (!existsSync(PID_FILE)) return false;
+  if (!existsSync(PID_FILE)) {
+    debug("daemon.isRunning", "no PID file", { selfPid: process.pid, selfPpid: process.ppid });
+    return false;
+  }
 
   try {
     const pid = parseInt(readFileSync(PID_FILE, "utf-8").trim(), 10);
     // Check if process is alive (signal 0 = just check)
     process.kill(pid, 0);
     // Process alive — check socket
-    if (existsSync(SOCKET_PATH)) return true;
-    // Process alive but socket missing — zombie daemon.
-    // Kill it so a fresh start can recreate the socket.
-    try { process.kill(pid, "SIGTERM"); } catch {}
-    cleanupStaleFiles();
+    if (existsSync(SOCKET_PATH)) {
+      debug("daemon.isRunning", "alive with socket", { targetPid: pid, selfPid: process.pid });
+      return true;
+    }
+
+    // Process alive but socket missing. This is either a normal startup window
+    // (daemon binding socket after writing PID) or a zombie (process stuck after
+    // crash). Either way, the CLIENT is not the right place to kill or clean up
+    // — that's launchd's job via KeepAlive=true. We just report not-ready;
+    // launchd will reap unresponsive daemons.
+    debug("daemon.isRunning", "alive but socket missing — not killing (let launchd handle)", {
+      targetPid: pid,
+      selfPid: process.pid,
+    });
     return false;
   } catch {
-    // Process not running - clean up stale files
-    cleanupStaleFiles();
+    // Process not running. Leave the stale PID file alone — the next daemon
+    // startup (via launchd KeepAlive) will overwrite it. Touching files from
+    // the client is what caused the cascading destruction in the first place.
+    debug("daemon.isRunning", "PID file points to dead process, returning false", {
+      selfPid: process.pid,
+    });
     return false;
   }
 }
@@ -126,8 +142,15 @@ export function sendCommand(command: string, args: Record<string, unknown> = {})
     socket.on("error", (err: NodeJS.ErrnoException) => {
       clearTimeout(timeout);
       if (err.code === "ECONNREFUSED" || err.code === "ENOENT") {
-        cleanupStaleFiles();
-        resolve({ ok: false, error: "Daemon not running" });
+        // Daemon might be restarting, busy, or genuinely down. Return error
+        // without touching any files — client should not be deleting the
+        // daemon's PID file just because one connection failed.
+        debug("daemon.sendCommand", "socket error, returning error (no cleanup)", {
+          command,
+          code: err.code,
+          selfPid: process.pid,
+        });
+        resolve({ ok: false, error: "Daemon not reachable" });
       } else {
         reject(err);
       }
@@ -147,7 +170,32 @@ export function sendCommand(command: string, args: Record<string, unknown> = {})
   });
 }
 
-function cleanupStaleFiles(): void {
+function cleanupStaleFiles(reason: string = "unspecified"): void {
+  // Observability: capture WHO is deleting PID/socket and what state they're in.
+  // This is investigating churn where client-side cleanup deletes a live daemon's
+  // files, causing launchd to spawn a duplicate daemon.
+  let sockInfo: Record<string, unknown> = { exists: false };
+  let pidInfo: Record<string, unknown> = { exists: false };
+  try {
+    if (existsSync(SOCKET_PATH)) {
+      const s = statSync(SOCKET_PATH);
+      sockInfo = { exists: true, ageMs: Date.now() - s.mtimeMs };
+    }
+  } catch {}
+  try {
+    if (existsSync(PID_FILE)) {
+      const s = statSync(PID_FILE);
+      const content = readFileSync(PID_FILE, "utf-8").trim();
+      pidInfo = { exists: true, ageMs: Date.now() - s.mtimeMs, pid: content };
+    }
+  } catch {}
+  debug("daemon.cleanup", "cleanupStaleFiles called", {
+    reason,
+    selfPid: process.pid,
+    selfPpid: process.ppid,
+    sock: sockInfo,
+    pid: pidInfo,
+  });
   try { unlinkSync(SOCKET_PATH); } catch {}
   try { unlinkSync(PID_FILE); } catch {}
 }
@@ -163,11 +211,23 @@ export async function startDaemonServer(): Promise<void> {
   // Ensure runtime dir exists
   mkdirSync(RUNTIME_DIR, { recursive: true });
 
-  // Clean up any stale socket
-  cleanupStaleFiles();
+  debug("daemon.start", "startDaemonServer entered", {
+    selfPid: process.pid,
+    selfPpid: process.ppid,
+    argv: process.argv.slice(2).join(" "),
+  });
 
-  // Write PID file
+  // Write our PID FIRST so concurrent status checks see a live daemon during
+  // the startup window (heavy async imports below take 3-30s). The bash
+  // launchd script also writes the PID before exec; this just overwrites with
+  // the same PID (exec preserves it). Doing the cleanup AFTER would erase the
+  // PID file that bash just wrote and create a race window.
   writeFileSync(PID_FILE, String(process.pid));
+  debug("daemon.start", "wrote PID file early", { pidFile: PID_FILE, pid: process.pid });
+
+  // Remove only a stale socket file (we will bind a fresh one). Never touch
+  // the PID file from here — touching it is what caused cascade restarts.
+  try { unlinkSync(SOCKET_PATH); } catch {}
 
   // Late-import heavy modules only in the daemon process
   const { enableProductionMode, createStore, searchFTS, searchVec, extractSnippet, getContextForFile,
@@ -592,7 +652,7 @@ export async function startDaemonServer(): Promise<void> {
         // Cleanup will happen in the finally block of startDaemonServer
         setTimeout(async () => {
           await disposeDefaultLlamaCpp();
-          cleanupStaleFiles();
+          cleanupStaleFiles("shutdown-command-handler");
           process.exit(0);
         }, 100);
         return { ok: true, data: "Shutting down" };
@@ -679,7 +739,7 @@ export async function startDaemonServer(): Promise<void> {
     } else {
       debug("daemon.socket", "server error", { code: err.code, message: err.message });
       console.error(`[qmd daemon] Server error: ${err.message}`);
-      cleanupStaleFiles();
+      cleanupStaleFiles(`server.error.${err.code}`);
       process.exit(1);
     }
   });
@@ -692,11 +752,16 @@ export async function startDaemonServer(): Promise<void> {
   // Graceful shutdown on signals
   const shutdown = async (signal: string) => {
     const t0 = Date.now();
-    debug("daemon.shutdown", `${signal} received, shutting down`);
+    debug("daemon.shutdown", `${signal} received, shutting down`, {
+      signal,
+      selfPid: process.pid,
+      selfPpid: process.ppid,
+      uptimeMs: Math.round(process.uptime() * 1000),
+    });
     console.error(`[qmd daemon] ${signal} received, shutting down...`);
     server.close();
     await disposeDefaultLlamaCpp();
-    cleanupStaleFiles();
+    cleanupStaleFiles(`shutdown.${signal}`);
     debug("daemon.shutdown", `done in ${Date.now() - t0}ms`);
     process.exit(0);
   };

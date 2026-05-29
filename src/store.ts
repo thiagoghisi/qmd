@@ -2331,8 +2331,22 @@ export function getCacheKey(url: string, body: object): string {
 
 export function getCachedResult(db: Database, cacheKey: string): string | null {
   return trackDbOp(`llm_cache.get`, () => {
-    const row = db.prepare(`SELECT result FROM llm_cache WHERE hash = ?`).get(cacheKey) as { result: string } | null;
-    return row?.result || null;
+    // First check the main connection. Cache writes go through a separate
+    // writer connection (see setCachedResult) to avoid BUSY_SNAPSHOT during
+    // long LLM calls, but the main connection's WAL read snapshot may not
+    // see those writes for the lifetime of the daemon process. If we don't
+    // see the row on main, fall back to the writer connection which will see
+    // its own committed writes.
+    const mainRow = db.prepare(`SELECT result FROM llm_cache WHERE hash = ?`).get(cacheKey) as { result: string } | null;
+    if (mainRow?.result) return mainRow.result;
+    if (cacheWriterDb) {
+      const writerRow = cacheWriterDb.prepare(`SELECT result FROM llm_cache WHERE hash = ?`).get(cacheKey) as { result: string } | null;
+      if (writerRow?.result) {
+        debug("llm_cache.read", "main-miss writer-hit", { keyPrefix: cacheKey.slice(0, 12) });
+        return writerRow.result;
+      }
+    }
+    return null;
   });
 }
 
@@ -4146,8 +4160,10 @@ function removeIncompleteEmbeddings(db: Database, expectedChunksByHash: Map<stri
 export async function expandQuery(query: string, model: string = DEFAULT_QUERY_MODEL, db: Database, intent?: string, llmOverride?: LlamaCpp): Promise<ExpandedQuery[]> {
   // Check cache first — stored as JSON preserving types
   const cacheKey = getCacheKey("expandQuery", { query, model, ...(intent && { intent }) });
+  debug("expand.cache", "lookup", { cacheKey: cacheKey.slice(0, 16), query: query.slice(0, 60), model: model.slice(-30) });
   const cached = getCachedResult(db, cacheKey);
   if (cached) {
+    debug("expand.cache", "HIT — skipping LLM", { cacheKey: cacheKey.slice(0, 16), bytes: cached.length });
     try {
       const parsed = JSON.parse(cached) as unknown;
       if (!Array.isArray(parsed)) return [];
@@ -4158,9 +4174,12 @@ export async function expandQuery(query: string, model: string = DEFAULT_QUERY_M
       } else if (rows.length > 0 && typeof rows[0]?.text === "string") {
         return rows.map((r) => ({ type: r.type as ExpandedQuery["type"], query: String(r.text) }));
       }
-    } catch {
-      // Old cache format (pre-typed, newline-separated text) — re-expand
+      debug("expand.cache", "HIT but malformed shape — falling through to LLM");
+    } catch (e) {
+      debug("expand.cache", "HIT but JSON.parse failed — falling through to LLM", { err: String(e).slice(0, 80) });
     }
+  } else {
+    debug("expand.cache", "MISS", { cacheKey: cacheKey.slice(0, 16) });
   }
 
   const llm = llmOverride ?? getDefaultLlamaCpp();

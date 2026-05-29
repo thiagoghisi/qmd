@@ -4645,7 +4645,32 @@ export function findDocuments(
 // Status
 // =============================================================================
 
+// getStatus TTL cache. Status is called rapidly by warmup script, MCP clients,
+// openclaw gateway, and CLI — often many times per second. The 6 underlying
+// SQL queries (GROUP BY, COUNTs, getHashesNeedingEmbedding JOIN) cost ~1-2s
+// on the 121K-doc 540K-vector index. The data is second-to-second stable, so
+// a 5s TTL is safe and saves 95%+ of the work under polling load. Cache is
+// keyed by model so different embedding models get independent entries.
+const STATUS_CACHE_TTL_MS = 5000;
+const _statusCache = new Map<string, { value: IndexStatus; expiresAt: number }>();
+
+/** Invalidate the getStatus cache. Call after writes (embed, update, etc.). */
+export function invalidateStatusCache(): void {
+  if (_statusCache.size > 0) {
+    debug("status.cache", "invalidated", { entries: _statusCache.size });
+    _statusCache.clear();
+  }
+}
+
 export function getStatus(db: Database, model: string = DEFAULT_EMBED_MODEL): IndexStatus {
+  const cached = _statusCache.get(model);
+  const now = Date.now();
+  if (cached && cached.expiresAt > now) {
+    debug("status.cache", "hit", { model, ageMs: STATUS_CACHE_TTL_MS - (cached.expiresAt - now) });
+    return cached.value;
+  }
+  debug("status.cache", "miss", { model, hadStale: !!cached });
+
   // DB is source of truth for collections — config provides supplementary metadata
   const dbCollections = db.prepare(`
     SELECT
@@ -4686,13 +4711,15 @@ export function getStatus(db: Database, model: string = DEFAULT_EMBED_MODEL): In
     ? (db.prepare(`SELECT COUNT(*) as c FROM content_vectors`).get() as { c: number }).c
     : 0;
 
-  return {
+  const result: IndexStatus = {
     totalDocuments: totalDocs,
     totalEmbeddings,
     needsEmbedding,
     hasVectorIndex: hasVectors,
     collections,
   };
+  _statusCache.set(model, { value: result, expiresAt: now + STATUS_CACHE_TTL_MS });
+  return result;
 }
 
 // =============================================================================

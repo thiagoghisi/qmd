@@ -405,18 +405,42 @@ export async function startDaemonServer(): Promise<void> {
         try {
           sendStderr(`Expanding query...\n`);
           const expandStart = Date.now();
+
+          // PERF: kick off the original query's vec search in parallel with
+          // the LLM expansion. The original phrasing is always one of the
+          // sub-searches anyway, and expandQuery uses the generate model
+          // while searchVec uses the embed model — independent code paths
+          // that can run concurrently without contention.
+          //
+          // When expandQuery is uncached, this hides ~1s of vec scan inside
+          // the ~2.5s LLM call. When cached, original vec finishes first;
+          // we still await both before merging to keep the merge consistent.
+          const originalVecPromise = Promise.all(
+            collectionScopes(collection).map(scope =>
+              store.searchVec(query, DEFAULT_EMBED_MODEL, limit, scope)
+            )
+          );
+
           const queries = await store.expandQuery(query, DEFAULT_QUERY_MODEL);
           const vsExpandMs = Date.now() - expandStart;
-          // Heuristic: <50ms == llm_cache hit (SQL lookup), >50ms == live LLM call.
-          // Live expansion typically takes 500ms-12s depending on novelty.
           debug("daemon.vsearch", `expanded in ${vsExpandMs}ms`, {
             count: queries.length,
             types: queries.map(q => q.type),
             cached: vsExpandMs < 50,
           });
+
+          const originalVecMs = Date.now() - expandStart;
+          const originalVecScopes = await originalVecPromise;
+          debug("daemon.vsearch", `original vec done`, {
+            elapsedSinceStart: originalVecMs,
+            hiddenInsideExpand: vsExpandMs >= originalVecMs,
+            scopes: originalVecScopes.length,
+            hits: originalVecScopes.reduce((sum, r) => sum + r.length, 0),
+          });
+
           sendStderr(`Expanded to ${queries.length} queries, searching vectors...\n`);
 
-          // Collect results
+          // Collect results — original results already done above.
           // Always include the original query alongside vec/hyde expansions —
           // the user-typed phrasing is often the best semantic match and the
           // LLM-generated alternatives can drift far from the source intent
@@ -426,13 +450,19 @@ export async function startDaemonServer(): Promise<void> {
           // Lex-typed expansions target BM25 in the hybrid path; skip them
           // in pure vsearch to avoid wasted vec scans.
           const allResults = new Map<string, any>();
-          const queryTexts = [
-            query,
-            ...queries
-              .filter(q => typeof q === 'string' || q.type !== 'lex')
-              .map(q => typeof q === 'string' ? q : q.query),
-          ];
-          for (const queryText of queryTexts) {
+          for (const scopeResults of originalVecScopes) {
+            for (const r of scopeResults) {
+              const existing = allResults.get(r.filepath);
+              if (!existing || r.score > existing.score) {
+                allResults.set(r.filepath, r);
+              }
+            }
+          }
+
+          const expansionTexts = queries
+            .filter(q => typeof q === 'string' || q.type !== 'lex')
+            .map(q => typeof q === 'string' ? q : q.query);
+          for (const queryText of expansionTexts) {
             for (const scope of collectionScopes(collection)) {
               const vecResults = await store.searchVec(queryText, DEFAULT_EMBED_MODEL, limit, scope);
               for (const r of vecResults) {
